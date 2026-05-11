@@ -2,9 +2,9 @@
 
 ## System Requirements
 
-- **Operating System**: Recommended Ubuntu 18.04 or later  
-- **GPU**: Nvidia GPU  
-- **Driver Version**: Recommended version 525 or later  
+- **Operating System**: Recommended Ubuntu 18.04 or later
+- **GPU**: Nvidia GPU
+- **Driver Version**: Recommended version 525 or later
 
 ---
 
@@ -35,7 +35,7 @@ source ~/.bashrc
 Use the following command to create a virtual environment:
 
 ```bash
-conda create -n rlgpu python=3.8
+conda create -n rlgpu python=3.11
 ```
 
 ### 1.3 Activate the Virtual Environment
@@ -53,18 +53,33 @@ conda activate rlgpu
 PyTorch is a neural network computation framework used for model training and inference. Install it using the following command:
 
 ```bash
-conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-### 2.2 Install Isaac Gym
+### 2.2 Install Isaac Lab (Recommended)
 
-Isaac Gym is a rigid body simulation and training framework provided by Nvidia.
+Isaac Lab is the successor to Isaac Gym (deprecated). It is recommended for new installations.
 
-#### 2.2.1 Download
+Navigate to the Isaac Lab source directory and install the subpackages:
+
+```bash
+cd ~/sourcecode/IsaacLab
+pip install -e source/isaaclab
+pip install -e source/isaaclab_rl
+pip install -e source/isaaclab_tasks
+pip install -e source/isaaclab_assets
+pip install -e source/isaaclab_mimic
+```
+
+### 2.3 Install Isaac Gym (Legacy, Deprecated)
+
+> **Note**: Isaac Gym is deprecated. Use Isaac Lab (Section 2.2) for new installations. This section is kept for reference only.
+
+#### 2.3.1 Download
 
 Download [Isaac Gym](https://developer.nvidia.com/isaac-gym) from Nvidia's official website.
 
-#### 2.2.2 Install
+#### 2.3.2 Install
 
 After extracting the package, navigate to the `isaacgym/python` folder and install it using the following commands:
 
@@ -73,8 +88,7 @@ cd isaacgym/python
 pip install -e .
 ```
 
-
-#### 2.2.3 Verify Installation
+#### 2.3.3 Verify Installation
 
 Run the following command. If a window opens displaying 1080 balls falling, the installation was successful:
 
@@ -85,9 +99,9 @@ python 1080_balls_of_solitude.py
 
 If you encounter any issues, refer to the official documentation at `isaacgym/docs/index.html`.
 
-### 2.3 Install VideoMimic Gym
+### 2.4 Install VideoMimic RL
 
-VideoMimic Gym is uses on `videomimic_rl`.
+VideoMimic RL provides the RL algorithms.
 
 ```bash
 cd videomimic_rl
@@ -95,7 +109,7 @@ pip install -e .
 cd ..
 ```
 
-### 2.4 Install videomimic_gym
+### 2.5 Install videomimic_gym
 
 Navigate to the directory and install it:
 
@@ -110,4 +124,3 @@ cd ..
 ## Summary
 
 After completing the above steps, you are ready to run the related programs in the virtual environment. If you encounter any issues, refer to the official documentation of each component or check if the dependencies are installed correctly.
-
