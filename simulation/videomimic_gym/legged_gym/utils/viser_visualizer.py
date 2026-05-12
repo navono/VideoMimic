@@ -520,8 +520,11 @@ class LeggedRobotViser:
         
 
     def init_isaacgym_robot(self, robot):
-        """Setup IsaacGym robot instance"""
+        """Setup robot instance (IsaacGym or IsaacLab)"""
         self.robot = robot
+
+    # Alias for IsaacLab compatibility
+    init_isaaclab_robot = init_isaacgym_robot
 
     def set_viewer_camera(self, position: Union[np.ndarray, List[float]], lookat: Union[np.ndarray, List[float]]):
         """

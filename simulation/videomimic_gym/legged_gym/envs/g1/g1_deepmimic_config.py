@@ -1329,15 +1329,22 @@ class G1DeepmimicRootHeightfieldNoHistoryDagger(G1DeepMimicCfgDagger):
     policy = G1DeepMimicCfgRootHeightfieldNoHistoryPolicyCfg()
 
 from legged_gym.utils.task_registry import task_registry
-from legged_gym.envs.g1.g1_deepmimic import G1DeepMimic
 
-task_registry.register( "g1_deepmimic", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgPPO())
-task_registry.register( "g1_deepmimic_mocap", G1DeepMimic, G1DeepMimicMocapCfg(), G1DeepMimicCfgPPO())
-task_registry.register( "g1_deepmimic_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgDagger())
-task_registry.register( "g1_deepmimic_heightfield", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicHeightFieldCfgPPO())
-task_registry.register( "g1_deepmimic_proj_heightfield", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgProjHeightfieldPPO())
-task_registry.register( "g1_deepmimic_root_heightfield", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgRootHeightfieldPPO())
-task_registry.register( "g1_deepmimic_root_heightfield_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicRootHeightfieldDagger())
-task_registry.register( "g1_deepmimic_root_heightfield_no_history_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicRootHeightfieldNoHistoryDagger())
-task_registry.register( "g1_deepmimic_root_heightfield_no_history_with_proj_joints_ppo", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgRootHeightfieldNoHistoryWithProjJointsPPO())
-task_registry.register( "g1_deepmimic_root_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicRootDagger())
+# Lazy registration — G1DeepMimic import requires IsaacLab (DirectRLEnv)
+# which needs Isaac Sim runtime (omni.log). Register only when available.
+try:
+    from legged_gym.envs.g1.g1_deepmimic import G1DeepMimic
+
+    task_registry.register( "g1_deepmimic", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgPPO())
+    task_registry.register( "g1_deepmimic_mocap", G1DeepMimic, G1DeepMimicMocapCfg(), G1DeepMimicCfgPPO())
+    task_registry.register( "g1_deepmimic_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgDagger())
+    task_registry.register( "g1_deepmimic_heightfield", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicHeightFieldCfgPPO())
+    task_registry.register( "g1_deepmimic_proj_heightfield", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgProjHeightfieldPPO())
+    task_registry.register( "g1_deepmimic_root_heightfield", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgRootHeightfieldPPO())
+    task_registry.register( "g1_deepmimic_root_heightfield_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicRootHeightfieldDagger())
+    task_registry.register( "g1_deepmimic_root_heightfield_no_history_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicRootHeightfieldNoHistoryDagger())
+    task_registry.register( "g1_deepmimic_root_heightfield_no_history_with_proj_joints_ppo", G1DeepMimic, G1DeepMimicCfg(), G1DeepMimicCfgRootHeightfieldNoHistoryWithProjJointsPPO())
+    task_registry.register( "g1_deepmimic_root_dagger", G1DeepMimic, G1DeepMimicCfg(), G1DeepmimicRootDagger())
+except ImportError:
+    # IsaacLab not available — registration deferred to task_registry.make_env()
+    pass

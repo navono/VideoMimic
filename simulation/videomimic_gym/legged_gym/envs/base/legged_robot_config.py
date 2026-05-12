@@ -138,7 +138,7 @@ class LeggedRobotCommandsCfg:
 @configclass
 class LeggedRobotInitStateCfg:
     pos = [0.0, 0.0, 1.] # x,y,z [m]
-    rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
+    rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat] (IsaacGym convention; LeggedRobotEnv auto-converts to wxyz for IsaacLab)
     lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
     ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
     default_joint_angles = { # target angles when action = 0.0

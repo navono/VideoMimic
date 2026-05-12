@@ -1,7 +1,7 @@
-from legged_gym.envs.base.robot_deepmimic import RobotDeepMimic
+from legged_gym.envs.base.robot_deepmimic import RobotDeepMimicEnv
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg
 from legged_gym import LEGGED_GYM_ROOT_DIR
-from legged_gym.envs.g1.g1_env import G1Robot
+from legged_gym.envs.g1.g1_env import G1RobotEnv
 from typing import Tuple, List
 import glob
 import os
@@ -10,8 +10,8 @@ import yaml
 import torch
 import time # For periodic logging
 
-class G1DeepMimic(RobotDeepMimic, G1Robot):
-    def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
+class G1DeepMimic(RobotDeepMimicEnv, G1RobotEnv):
+    def __init__(self, cfg: LeggedRobotCfg, render_mode: str | None = None, **kwargs):
         # Store default patterns, these might be overridden by YAML
         self.default_human_video_data_pattern = cfg.deepmimic.human_video_data_pattern
         self.default_human_video_terrain_pattern = cfg.deepmimic.human_video_terrain_pattern
@@ -24,7 +24,17 @@ class G1DeepMimic(RobotDeepMimic, G1Robot):
         # # self.data_pattern = 'retarget_poses_g1_fit.h5'
 
         # Initialize RobotDeepMimic first, which creates self.replay_data_loader
-        RobotDeepMimic.__init__(self, cfg, sim_params, physics_engine, sim_device, headless)
+        RobotDeepMimicEnv.__init__(self, cfg, render_mode=render_mode, **kwargs)
+
+        # Now self.device is available — convert checkpoint mapping to tensor
+        if hasattr(self, '_terrain_to_checkpoint_idx_list'):
+            self.terrain_to_checkpoint_idx = torch.tensor(
+                self._terrain_to_checkpoint_idx_list, device=self.device
+            )
+            # Ensure mapping length matches path lengths
+            if len(self.terrain_to_checkpoint_idx) != len(self.replay_data_loader.get_pkl_paths()):
+                print(f"Warning: Mismatch in length between terrain_to_checkpoint_idx ({len(self.terrain_to_checkpoint_idx)}) and replay_data_paths. This should not happen.")
+            del self._terrain_to_checkpoint_idx_list
 
         # --- Success Rate Tracking Initialization ---
         self.success_history_length = 1000
@@ -264,11 +274,8 @@ class G1DeepMimic(RobotDeepMimic, G1Robot):
 
         # Assign the generated lists to instance variables
         self.teacher_checkpoints = local_teacher_checkpoints
-        self.terrain_to_checkpoint_idx = torch.tensor(local_terrain_to_checkpoint_idx, device=self.device)
-
-        # Ensure mapping length matches path lengths
-        if len(self.terrain_to_checkpoint_idx) != len(replay_data_paths):
-             print(f"Warning: Mismatch in length between terrain_to_checkpoint_idx ({len(self.terrain_to_checkpoint_idx)}) and replay_data_paths ({len(replay_data_paths)}). This should not happen.")
+        # Store as list for now; will convert to tensor after device is available
+        self._terrain_to_checkpoint_idx_list = local_terrain_to_checkpoint_idx
 
         return replay_data_paths, terrain_paths, local_data_fps_override
 
@@ -319,47 +326,29 @@ class G1DeepMimic(RobotDeepMimic, G1Robot):
         # print(f'checkpoint_indices: {checkpoint_indices}')
         return checkpoint_indices
 
-    def check_termination(self):
-        """ Checks if environments need to be reset and updates success rate history."""
-        # Call parent class method first to determine reset_buf and time_out_buf
-        super().check_termination()
+    def _get_dones(self):
+        """Check termination and update success rate history."""
+        died, time_out = super()._get_dones()
 
         # --- Update Success Rate History ---
         if self.num_unique_clips > 0:
-            # Find environments that are resetting in this step
-            reset_env_ids = torch.where(self.reset_buf)[0]
+            reset_env_ids = torch.where(died)[0]
 
             if len(reset_env_ids) > 0:
-                # Determine success (1 if timeout, 0 otherwise)
-                # Note: time_out_buf is True only if it's the primary reason for reset.
-                # If reset_buf is True due to other reasons (fall, etc.), time_out_buf might be False even if max steps reached.
-                # We consider success *only* if the episode timed out.
-                is_success = self.time_out_buf[reset_env_ids].long()
-
-                # Get the original clip indices for the resetting environments
-                # Need the indices *before* reset_idx potentially changes them
+                is_success = time_out[reset_env_ids].long()
                 original_clip_indices = self.replay_data_loader.episode_indices[reset_env_ids]
-
-                # Map to unique clip indices
                 unique_clip_indices = self.original_idx_to_unique_idx[original_clip_indices]
-
-                # Get current history pointers for these unique clips
                 history_pointers = self.clip_history_ptr[unique_clip_indices]
-
-                # Update history buffer at the pointer locations
                 self.clip_success_history[unique_clip_indices, history_pointers] = is_success
-
-                # Increment pointers (circularly)
                 self.clip_history_ptr[unique_clip_indices] = (history_pointers + 1) % self.success_history_length
-
-                # Increment rollout counts (clamped at history_length)
                 current_counts = self.clip_rollout_count[unique_clip_indices]
                 new_counts = torch.min(
                     current_counts + 1,
                     torch.tensor(self.success_history_length, device=self.device, dtype=torch.long)
                 )
                 self.clip_rollout_count[unique_clip_indices] = new_counts
-        # -----------------------------------
+
+        return died, time_out
 
     def _compute_and_log_success_rates(self):
         """ Calculates and logs the success rate for each clip. """
@@ -419,68 +408,48 @@ class G1DeepMimic(RobotDeepMimic, G1Robot):
 
         return current_success_rates # Return per-unique-clip rates
 
-    def compute_observations(self):
-        # --- Record Clip Distribution --- 
+    def _get_observations(self):
+        # --- Record Clip Distribution ---
         if self.num_unique_clips > 0:
-            # Get current original clip indices for all environments
             original_clip_indices = self.replay_data_loader.episode_indices
-
-            # Map to unique clip indices
             unique_clip_indices = self.original_idx_to_unique_idx[original_clip_indices]
-
-            # Count occurrences of each unique index across all environments
             current_step_distribution = torch.bincount(
-                unique_clip_indices, 
+                unique_clip_indices,
                 minlength=self.num_unique_clips
-            ).long() # Ensure result is long tensor
-
-            # Store distribution in history buffer
+            ).long()
             ptr = self.step_dist_history_ptr.item()
             self.step_clip_distribution_history[ptr] = current_step_distribution
-
-            # Increment pointer (circularly)
             self.step_dist_history_ptr = (self.step_dist_history_ptr + 1) % self.success_history_length
-
-            # Increment step count (clamped at history_length)
             self.step_dist_rollout_count = torch.min(
                 self.step_dist_rollout_count + 1,
                 torch.tensor(self.success_history_length, device=self.device, dtype=torch.long)
             )
-        # ----------------------------- 
 
         # Log success rates periodically
-        current_step = self.gym.get_frame_count(self.sim) # Using frame count as a proxy for steps
+        current_step = self._sim_step_counter.item() if hasattr(self, '_sim_step_counter') else self.episode_length_buf.sum().item()
         if current_step >= self.last_log_step + self.log_success_rate_interval:
-            # Compute success rates (also needed for potential weight update)
             current_unique_success_rates = self._compute_and_log_success_rates()
             self._compute_and_log_clip_distribution()
             self.last_log_step = current_step
 
-            # Update adaptive weights if strategy is active and interval passed
             if self.cfg.deepmimic.clip_weighting_strategy == 'success_rate_adaptive' and self.num_unique_clips > 0:
-                 # Map unique success rates back to the full list of original clips
                 success_rates_full = torch.full((self.num_clips,), float('nan'), device=self.device, dtype=torch.float32)
-                # Use the mapping: original_idx -> unique_idx -> success_rate
                 valid_unique_mask = ~torch.isnan(current_unique_success_rates)
                 valid_unique_indices = torch.where(valid_unique_mask)[0]
-                
-                # Create a mask for original indices that map to valid unique indices
+
                 original_indices_with_valid_rates_mask = torch.zeros(self.num_clips, dtype=torch.bool, device=self.device)
                 for unique_idx in valid_unique_indices:
-                     original_indices_with_valid_rates_mask |= (self.original_idx_to_unique_idx == unique_idx)
-                
-                # Apply the rates
+                    original_indices_with_valid_rates_mask |= (self.original_idx_to_unique_idx == unique_idx)
+
                 valid_original_indices = torch.where(original_indices_with_valid_rates_mask)[0]
                 if len(valid_original_indices) > 0:
                     unique_map_for_valid_originals = self.original_idx_to_unique_idx[valid_original_indices]
                     success_rates_full[valid_original_indices] = current_unique_success_rates[unique_map_for_valid_originals]
 
-                # Update weights in ReplayDataLoader
                 self.replay_data_loader.update_adaptive_weights(success_rates_full)
-                # print(f"Step {current_step}: Updated adaptive weights.") # Optional: for debugging
-                self.last_weight_update_step = current_step # Reset timer after update
+                self.last_weight_update_step = current_step
 
-        return super().compute_observations()
+        return super()._get_observations()
 
     def _compute_and_log_clip_distribution(self):
         """ Calculates and logs the distribution of steps spent on each clip over the history. """

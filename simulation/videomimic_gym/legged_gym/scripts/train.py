@@ -2,12 +2,19 @@ import os
 import numpy as np
 from datetime import datetime
 import sys
+import torch
 
-import isaacgym
-from legged_gym.envs import *
+# Parse args first — must happen before SimulationApp so --headless is available
 from legged_gym.utils import get_args, task_registry
 from legged_gym.utils.helpers import parse_unknown_args
-import torch
+
+args, unknown = get_args()
+
+# Bootstrap Isaac Sim Kit runtime before any isaaclab imports
+from isaacsim import SimulationApp
+app = SimulationApp({"headless": args.headless})
+
+from legged_gym.envs import *
 
 def train(args, unknown):
     # Parse unknown args into env and train override dicts
@@ -24,5 +31,4 @@ def train(args, unknown):
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=False)
 
 if __name__ == '__main__':
-    args, unknown = get_args()
     train(args, unknown)

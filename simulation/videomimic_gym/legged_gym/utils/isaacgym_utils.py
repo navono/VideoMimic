@@ -1,18 +1,16 @@
-import os
 import numpy as np
-import random
 import torch
 import argparse
-from isaacgym.gymutil import parse_device_str
-from isaacgym import gymapi
 
 @torch.jit.script
 def copysign(a, b):
     # type: (float, Tensor) -> Tensor
     a = torch.tensor(a, device=b.device, dtype=torch.float).repeat(b.shape[0])
     return torch.abs(a) * torch.sign(b)
+
 def get_euler_xyz(q):
-    qx, qy, qz, qw = 0, 1, 2, 3
+    """Compute roll, pitch, yaw from quaternion in wxyz convention (IsaacLab)."""
+    qw, qx, qy, qz = 0, 1, 2, 3
     # roll (x-axis rotation)
     sinr_cosp = 2.0 * (q[:, qw] * q[:, qx] + q[:, qy] * q[:, qz])
     cosr_cosp = q[:, qw] * q[:, qw] - q[:, qx] * \
@@ -32,8 +30,8 @@ def get_euler_xyz(q):
 
     return torch.stack((roll, pitch, yaw), dim=-1)
 
-def parse_arguments_modified(description="Isaac Gym Example", headless=False, no_graphics=False, custom_parameters=[]):
-    """Modefied from gymutil.parse_arguments to also allow unknown argument parsing."""
+def parse_arguments_modified(description="IsaacLab Training", headless=False, no_graphics=False, custom_parameters=[]):
+    """Parse command line arguments for IsaacLab-based training."""
     parser = argparse.ArgumentParser(description=description)
     if headless:
         parser.add_argument('--headless', action='store_true', help='Run headless without creating a viewer window')
@@ -44,13 +42,8 @@ def parse_arguments_modified(description="Isaac Gym Example", headless=False, no
     parser.add_argument('--pipeline', type=str, default="gpu", help='Tensor API pipeline (cpu/gpu)')
     parser.add_argument('--graphics_device_id', type=int, default=0, help='Graphics Device ID')
 
-    physics_group = parser.add_mutually_exclusive_group()
-    physics_group.add_argument('--flex', action='store_true', help='Use FleX for physics')
-    physics_group.add_argument('--physx', action='store_true', help='Use PhysX for physics')
-
     parser.add_argument('--num_threads', type=int, default=0, help='Number of cores used by PhysX')
     parser.add_argument('--subscenes', type=int, default=0, help='Number of PhysX subscenes to simulate in parallel')
-    parser.add_argument('--slices', type=int, help='Number of client threads that process env slices')
 
     for argument in custom_parameters:
         if ("name" in argument) and ("type" in argument or "action" in argument):
@@ -74,34 +67,29 @@ def parse_arguments_modified(description="Isaac Gym Example", headless=False, no
 
     args, unknown = parser.parse_known_args()
 
-    args.sim_device_type, args.compute_device_id = parse_device_str(args.sim_device)
-    pipeline = args.pipeline.lower()
+    # Parse device string (replaces gymutil.parse_device_str)
+    device_str = args.sim_device
+    if device_str.startswith("cuda"):
+        args.sim_device_type = "cuda"
+        device_id = device_str.split(":")
+        args.compute_device_id = int(device_id[1]) if len(device_id) > 1 else 0
+    else:
+        args.sim_device_type = "cpu"
+        args.compute_device_id = 0
 
+    pipeline = args.pipeline.lower()
     assert (pipeline == 'cpu' or pipeline in ('gpu', 'cuda')), f"Invalid pipeline '{args.pipeline}'. Should be either cpu or gpu."
     args.use_gpu_pipeline = (pipeline in ('gpu', 'cuda'))
 
-    if args.sim_device_type != 'cuda' and args.flex:
-        print("Can't use Flex with CPU. Changing sim device to 'cuda:0'")
-        args.sim_device = 'cuda:0'
-        args.sim_device_type, args.compute_device_id = parse_device_str(args.sim_device)
-
-    if (args.sim_device_type != 'cuda' and pipeline == 'gpu'):
+    if args.sim_device_type != 'cuda' and pipeline == 'gpu':
         print("Can't use GPU pipeline with CPU Physics. Changing pipeline to 'CPU'.")
         args.pipeline = 'CPU'
         args.use_gpu_pipeline = False
 
-    # Default to PhysX
-    args.physics_engine = gymapi.SIM_PHYSX
     args.use_gpu = (args.sim_device_type == 'cuda')
 
-    if args.flex:
-        args.physics_engine = gymapi.SIM_FLEX
-
     # Using --nographics implies --headless
-    if no_graphics and args.nographics:
+    if no_graphics and hasattr(args, 'nographics') and args.nographics:
         args.headless = True
-
-    if args.slices is None:
-        args.slices = args.subscenes
 
     return args, unknown

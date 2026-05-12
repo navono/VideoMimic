@@ -1,18 +1,22 @@
 import sys
-from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
-import sys
-from legged_gym import LEGGED_GYM_ROOT_DIR
-
-import isaacgym
-from legged_gym.envs import *
-from legged_gym.utils import get_args, export_policy_as_jit, task_registry, Logger
-from legged_gym.utils.helpers import parse_unknown_args
-
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from datetime import datetime
+
+from legged_gym import LEGGED_GYM_ROOT_DIR
+from legged_gym.utils import get_args, export_policy_as_jit, task_registry, Logger
+from legged_gym.utils.helpers import parse_unknown_args
+
+# Parse args before SimulationApp so --headless is available
+args, unknown = get_args()
+
+# Bootstrap Isaac Sim Kit runtime before any isaaclab imports
+from isaacsim import SimulationApp
+app = SimulationApp({"headless": args.headless})
+
+from legged_gym.envs import *
 
 
 def place_trace(args, unknown):
@@ -377,5 +381,4 @@ if __name__ == '__main__':
     EXPORT_POLICY = False
     RECORD_FRAMES = False
     MOVE_CAMERA = False
-    args, unknown = get_args()
     place_trace(args, unknown) 

@@ -1,59 +1,38 @@
+"""G1RobotEnv — IsaacLab-based G1 legged robot environment.
 
-from legged_gym.envs.base.legged_robot import LeggedRobot
+Migrated from the IsaacGym-based G1Robot(LeggedRobot).
+Inherits from LeggedRobotEnv (DirectRLEnv) and replaces all IsaacGym API calls.
+"""
 
-from legged_gym.tensor_utils.torch_jit_utils import  *
-from isaacgym import gymtorch, gymapi, gymutil
+import numpy as np
 import torch
 
-class G1Robot(LeggedRobot):
+from legged_gym.envs.base.legged_robot import LeggedRobotEnv
 
-    def _get_noise_scale_vec(self, cfg):
-        """ Sets a vector used to scale the noise added to the observations.
-            [NOTE]: Must be adapted when changing the observations structure
 
-        Args:
-            cfg (Dict): Environment config file
+class G1RobotEnv(LeggedRobotEnv):
+    """G1-specific legged robot environment using IsaacLab.
 
-        Returns:
-            [torch.Tensor]: Vector of scales used to multiply a uniform distribution in [-1, 1]
-        """
-        noise_vec = torch.zeros_like(self.obs_dict['torso'])
-        self.add_noise = self.cfg.noise.add_noise
-        noise_scales = self.cfg.noise.noise_scales
-        noise_level = self.cfg.noise.noise_level
-        noise_vec[:3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
-        noise_vec[3:6] = noise_scales.gravity * noise_level
-        noise_vec[6:9] = 0. # commands
-        noise_vec[9:9+self.num_actions] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-        noise_vec[9+self.num_actions:9+2*self.num_actions] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        noise_vec[9+2*self.num_actions:9+3*self.num_actions] = 0. # previous actions
-        noise_vec[9+3*self.num_actions:9+3*self.num_actions+2] = 0. # sin/cos phase
-        
-        return noise_vec
+    Adds foot tracking, gait phase computation, and G1-specific rewards.
+    """
 
-    def _init_foot(self):
-        self.feet_num = len(self.feet_indices)
-        
-        rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state)
-        self.rigid_body_states_view = self.rigid_body_states.view(self.num_envs, -1, 13)
-        self.feet_state = self.rigid_body_states_view[:, self.feet_indices, :]
-        self.feet_pos = self.feet_state[:, :, :3]
-        self.feet_vel = self.feet_state[:, :, 7:10]
-        
     def _init_buffers(self):
         self.phase = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         super()._init_buffers()
         self._init_foot()
 
+    def _init_foot(self):
+        self.feet_num = len(self.feet_indices)
+        # IsaacLab: body states accessed directly from Articulation data
+        self.feet_pos = self.rigid_body_pos[:, self.feet_indices, :3]
+        self.feet_vel = self.rigid_body_vel[:, self.feet_indices, :3]
+
     def update_feet_state(self):
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-        
-        self.feet_state = self.rigid_body_states_view[:, self.feet_indices, :]
-        self.feet_pos = self.feet_state[:, :, :3]
-        self.feet_vel = self.feet_state[:, :, 7:10]
-        
-    def _post_physics_step_callback(self):
+        # No need to call gym.refresh — IsaacLab auto-updates on scene.update()
+        self.feet_pos = self.rigid_body_pos[:, self.feet_indices, :3]
+        self.feet_vel = self.rigid_body_vel[:, self.feet_indices, :3]
+
+    def _post_step_update(self):
         self.update_feet_state()
 
         period = 0.8
@@ -62,48 +41,57 @@ class G1Robot(LeggedRobot):
         self.phase_left = self.phase
         self.phase_right = (self.phase + offset) % 1
         self.leg_phase = torch.cat([self.phase_left.unsqueeze(1), self.phase_right.unsqueeze(1)], dim=-1)
-        
-        return super()._post_physics_step_callback()
-    
-    
+
+        return super()._post_step_update()
+
+    # ---- Observations ----
+
     def _obs_torso(self):
-        """ Computes observations
-        """
-        sin_phase = torch.sin(2 * np.pi * self.phase ).unsqueeze(1)
-        cos_phase = torch.cos(2 * np.pi * self.phase ).unsqueeze(1)
-        obs = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions,
-                                    sin_phase,
-                                    cos_phase
-                                    ),dim=-1)
-
-        # add perceptive inputs if not blind
-        # add noise if needed
-        # if self.add_noise:
-        #     obs += (2 * torch.rand_like(obs) - 1) * self.noise_scale_vec
-        # print(f'warning not adding noise to torso')
+        sin_phase = torch.sin(2 * np.pi * self.phase).unsqueeze(1)
+        cos_phase = torch.cos(2 * np.pi * self.phase).unsqueeze(1)
+        obs = torch.cat((
+            self.base_ang_vel * self.obs_scales.ang_vel,
+            self.projected_gravity,
+            self.commands[:, :3] * self.commands_scale,
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+            self.dof_vel * self.obs_scales.dof_vel,
+            self.actions,
+            sin_phase,
+            cos_phase
+        ), dim=-1)
         return obs
-    
-    def _obs_torso_privileged(self):
-        sin_phase = torch.sin(2 * np.pi * self.phase ).unsqueeze(1)
-        cos_phase = torch.cos(2 * np.pi * self.phase ).unsqueeze(1)
-        return torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
-                                    self.base_ang_vel  * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions,
-                                    sin_phase,
-                                    cos_phase
-                                    ),dim=-1)
-        
 
-        
+    def _obs_torso_privileged(self):
+        sin_phase = torch.sin(2 * np.pi * self.phase).unsqueeze(1)
+        cos_phase = torch.cos(2 * np.pi * self.phase).unsqueeze(1)
+        return torch.cat((
+            self.base_lin_vel * self.obs_scales.lin_vel,
+            self.base_ang_vel * self.obs_scales.ang_vel,
+            self.projected_gravity,
+            self.commands[:, :3] * self.commands_scale,
+            (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+            self.dof_vel * self.obs_scales.dof_vel,
+            self.actions,
+            sin_phase,
+            cos_phase
+        ), dim=-1)
+
+    def _get_noise_scale_vec(self, cfg):
+        noise_vec = torch.zeros_like(self.obs_dict['torso'])
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        noise_vec[:3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        noise_vec[3:6] = noise_scales.gravity * noise_level
+        noise_vec[6:9] = 0.  # commands
+        noise_vec[9:9 + self.num_actions] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        noise_vec[9 + self.num_actions:9 + 2 * self.num_actions] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        noise_vec[9 + 2 * self.num_actions:9 + 3 * self.num_actions] = 0.  # previous actions
+        noise_vec[9 + 3 * self.num_actions:9 + 3 * self.num_actions + 2] = 0.  # sin/cos phase
+        return noise_vec
+
+    # ---- Rewards ----
+
     def _reward_contact(self):
         res = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         for i in range(self.feet_num):
@@ -111,28 +99,20 @@ class G1Robot(LeggedRobot):
             contact = self.contact_forces[:, self.feet_indices[i], 2] > 1
             res += ~(contact ^ is_stance)
         return res
-    
+
     def _reward_feet_swing_height(self):
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 1.
         pos_error = torch.square(self.feet_pos[:, :, 2] - 0.08) * ~contact
         return torch.sum(pos_error, dim=(1))
-    
+
     def _reward_alive(self):
-        # Reward for staying alive
         return torch.ones(self.num_envs, dtype=torch.float, device=self.device)
-    
+
     def _reward_contact_no_vel(self):
-        # Penalize contact with no velocity
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 1.
         contact_feet_vel = self.feet_vel * contact.unsqueeze(-1)
-        # penalize = torch.square(contact_feet_vel[:, :, :3])
-        # penalty = torch.sum(penalize, dim=(1,2))
-        # norm has somewhat nicer properties
         new_penalty = torch.norm(contact_feet_vel[:, :, :3], dim=2).sum(dim=1)
-        # print(f'penalty: {penalty}')
-        # print(f'new_penalty: {new_penalty}')
         return new_penalty
-    
+
     def _reward_hip_pos(self):
-        return torch.sum(torch.square(self.dof_pos[:,[1,2,7,8]]), dim=1)
-    
+        return torch.sum(torch.square(self.dof_pos[:, [1, 2, 7, 8]]), dim=1)

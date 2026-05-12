@@ -1,4 +1,3 @@
-import isaacgym
 # from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgV2
 # from legged_gym.envs.g1.g1_deepmimic_config import G1DeepMimicCfg, G1DeepMimicCfgV2
 from legged_gym.envs.base.legged_robot_config import  LeggedRobotCfg as LeggedNew

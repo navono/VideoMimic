@@ -9,8 +9,7 @@ from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
-from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params, update_cfg_from_overrides
-# from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, update_cfg_from_overrides
 from .configclass import configclass
 
 
@@ -20,15 +19,19 @@ class TaskRegistry():
         self.task_classes = {}
         self.env_cfgs = {}
         self.train_cfgs = {}
-    
+
+    @property
+    def registry(self):
+        return self.task_classes
+
     def register(self, name: str, task_class: VecEnv, env_cfg: configclass, train_cfg: configclass):
         self.task_classes[name] = task_class
         self.env_cfgs[name] = env_cfg
         self.train_cfgs[name] = train_cfg
-    
+
     def get_task_class(self, name: str) -> VecEnv:
         return self.task_classes[name]
-    
+
     def get_cfgs(self, name, env_overrides=None, train_overrides=None) -> Tuple[configclass, configclass]:
         train_cfg = self.train_cfgs[name]
         env_cfg = self.env_cfgs[name]
@@ -39,82 +42,74 @@ class TaskRegistry():
         if train_overrides is not None:
             update_cfg_from_overrides(train_cfg, train_overrides)
         return env_cfg, train_cfg
-    
+
     def make_env(self, name, args=None, env_cfg=None, env_overrides=None) -> Tuple[VecEnv, configclass]:
-        """ Creates an environment either from a registered namme or from the provided config file.
+        """Creates an environment using IsaacLab's DirectRLEnv interface.
 
         Args:
-            name (string): Name of a registered env.
-            args (Args, optional): Isaac Gym comand line arguments. If None get_args() will be called. Defaults to None.
-            env_cfg (Dict, optional): Environment config file used to override the registered config. Defaults to None.
-
-        Raises:
-            ValueError: Error if no registered env corresponds to 'name' 
+            name: Name of a registered env.
+            args: Command line arguments. If None get_args() will be called.
+            env_cfg: Environment config to override the registered config.
+            env_overrides: Dict of overrides for the env config.
 
         Returns:
-            isaacgym.VecTaskPython: The created environment
-            Dict: the corresponding config file
+            env: The created environment
+            env_cfg: the corresponding config file
         """
-        # if no args passed get command line arguments
         if args is None:
             args = get_args()
-        # check if there is a registered env with that name
+        # Trigger lazy registration if env classes haven't been imported yet
+        if name not in self.task_classes:
+            from legged_gym.envs import _ensure_registered
+            _ensure_registered()
         if name in self.task_classes:
             task_class = self.get_task_class(name)
         else:
             raise ValueError(f"Task with name: {name} was not registered")
         if env_cfg is None:
-            # load config files
             env_cfg, _ = self.get_cfgs(name)
-        # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         if env_overrides is not None:
             update_cfg_from_overrides(env_cfg, env_overrides)
             print(env_overrides)
         print(env_cfg)
         set_seed(env_cfg.seed)
-        # parse sim params (convert to dict first)
-        sim_params = {"sim": class_to_dict(env_cfg.sim)}
-        sim_params = parse_sim_params(args, sim_params)
-        env = task_class(   cfg=env_cfg,
-                            sim_params=sim_params,
-                            physics_engine=args.physics_engine,
-                            sim_device=args.sim_device,
-                            headless=args.headless)
+
+        # Determine render mode from args
+        render_mode = None
+        if args.headless:
+            render_mode = None  # DirectRLEnv handles headless via enable_rendering=False in cfg
+        else:
+            render_mode = "rgb_array"
+
+        # Create env using IsaacLab-style constructor
+        env = task_class(cfg=env_cfg, render_mode=render_mode)
         return env, env_cfg
 
     def make_alg_runner(self, env, name=None, args=None, train_cfg=None, train_overrides=None, log_root="default") -> Tuple[OnPolicyRunner, configclass]:
-        """ Creates the training algorithm  either from a registered namme or from the provided config file.
+        """Creates the training algorithm runner.
 
         Args:
-            env (isaacgym.VecTaskPython): The environment to train (TODO: remove from within the algorithm)
-            name (string, optional): Name of a registered env. If None, the config file will be used instead. Defaults to None.
-            args (Args, optional): Isaac Gym comand line arguments. If None get_args() will be called. Defaults to None.
-            train_cfg (Dict, optional): Training config file. If None 'name' will be used to get the config file. Defaults to None.
-            log_root (str, optional): Logging directory for Tensorboard. Set to 'None' to avoid logging (at test time for example). 
-                                      Logs will be saved in <log_root>/<date_time>_<run_name>. Defaults to "default"=<path_to_LEGGED_GYM>/logs/<experiment_name>.
-
-        Raises:
-            ValueError: Error if neither 'name' or 'train_cfg' are provided
-            Warning: If both 'name' or 'train_cfg' are provided 'name' is ignored
+            env: The environment to train.
+            name: Name of a registered env.
+            args: Command line arguments.
+            train_cfg: Training config file.
+            train_overrides: Dict of overrides for the train config.
+            log_root: Logging directory root.
 
         Returns:
-            PPO: The created algorithm
-            Dict: the corresponding config file
+            runner: The created OnPolicyRunner
+            train_cfg: the corresponding config file
         """
-        # if no args passed get command line arguments
         if args is None:
             args = get_args()
-        # if config files are passed use them, otherwise load from the name
         if train_cfg is None:
             if name is None:
                 raise ValueError("Either 'name' or 'train_cfg' must be not None")
-            # load config files
             _, train_cfg = self.get_cfgs(name)
         else:
             if name is not None:
                 print(f"'train_cfg' provided -> Ignoring 'name={name}'")
-        # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
 
         train_cfg.runner.use_wandb = not args.no_use_wandb
@@ -137,7 +132,7 @@ class TaskRegistry():
         else:
             log_dir = os.path.join(log_root, total_run_name)
 
-        if train_cfg.algorithm.use_multi_teacher:
+        if hasattr(train_cfg.algorithm, 'use_multi_teacher') and train_cfg.algorithm.use_multi_teacher:
             train_cfg.algorithm.policy_to_clone = env.teacher_checkpoints
 
         train_cfg_dict = class_to_dict(train_cfg)
@@ -145,7 +140,6 @@ class TaskRegistry():
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:
-            # load previously trained model
             resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint, multi_gpu=args.multi_gpu, multi_gpu_rank=os.getenv("RANK", "0"))
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path, load_optimizer=False)

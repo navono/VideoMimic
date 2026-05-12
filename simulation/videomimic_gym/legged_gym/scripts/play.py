@@ -1,11 +1,20 @@
 import os
-import isaacgym
+import sys
 import torch
 import numpy as np
-from legged_gym import LEGGED_GYM_ROOT_DIR
-from legged_gym.envs import *
+
+# Parse args first — must happen before SimulationApp so --headless is available
 from legged_gym.utils import get_args, task_registry
 from legged_gym.utils.helpers import parse_unknown_args, get_load_path, class_to_dict
+
+args, unknown = get_args()
+
+# Bootstrap Isaac Sim Kit runtime before any isaaclab imports
+from isaacsim import SimulationApp
+app = SimulationApp({"headless": args.headless})
+
+from legged_gym import LEGGED_GYM_ROOT_DIR
+from legged_gym.envs import *
 from rsl_rl.utils.jit import export_policy_as_jit
 
 
@@ -25,7 +34,6 @@ class PlayManager:
         self.env, _ = task_registry.make_env(
             name=args.task, args=args, env_cfg=self.env_cfg, env_overrides=self.env_overrides
         )
-
 
         # Set some additional config flags
         args.use_wandb = False
@@ -114,12 +122,9 @@ class PlayManager:
             raise e
 
     def step_simulation(self):
-        """Perform one simulation step for both IsaacGym."""
+        """Perform one simulation step."""
         obs = self.env.get_observations()
-
         actions = self.policy({k: v.detach() for k, v in obs.items()}, monitor_activations=False)
-
-        # Step the IsaacGym environment
         obs, rews, dones, infos = self.env.step(actions.detach())
 
     def run(self):
@@ -129,7 +134,5 @@ class PlayManager:
 
 
 if __name__ == '__main__':
-    args, unknown = get_args()
-
     play_manager = PlayManager(args, unknown)
     play_manager.run()
