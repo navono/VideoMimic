@@ -120,6 +120,17 @@ class LeggedRobotEnv(DirectRLEnv):
         This bridges VideoMimic's custom config hierarchy to IsaacLab's required
         DirectRLEnvCfg, so child configs (G1RoughCfg, etc.) remain unchanged.
         """
+        from isaaclab.sim.simulation_cfg import PhysxCfg
+
+        # Map VideoMimic Physx config to IsaacLab PhysxCfg
+        physx_cfg = PhysxCfg(
+            solver_type=cfg.sim.physx.solver_type,
+            min_position_iteration_count=cfg.sim.physx.num_position_iterations,
+            max_position_iteration_count=cfg.sim.physx.num_position_iterations,
+            min_velocity_iteration_count=cfg.sim.physx.num_velocity_iterations,
+            max_velocity_iteration_count=cfg.sim.physx.num_velocity_iterations,
+            bounce_threshold_velocity=cfg.sim.physx.bounce_threshold_velocity,
+        )
 
         @configclass
         class _SceneCfg(InteractiveSceneCfg):
@@ -131,6 +142,7 @@ class LeggedRobotEnv(DirectRLEnv):
             sim: SimulationCfg = SimulationCfg(
                 dt=cfg.sim.dt,
                 gravity=cfg.sim.gravity,
+                physx=physx_cfg,
             )
             scene: InteractiveSceneCfg = _SceneCfg()
             decimation: int = cfg.control.decimation
@@ -308,6 +320,30 @@ class LeggedRobotEnv(DirectRLEnv):
         else:
             self.dof_pos_targets = self._compute_dof_pos_targets(self.actions).view(self.dof_pos_targets.shape)
             self.robot.set_joint_position_target(self.dof_pos_targets, joint_ids=joint_ids)
+
+        # Debug: print torque/diag info for the first few sim steps (env 0 only)
+        if not getattr(self, '_apply_action_diag_done', False):
+            self._apply_action_step = getattr(self, '_apply_action_step', 0) + 1
+            if self._apply_action_step <= 40:
+                root_pos = self.robot.data.root_pos_w[0]
+                root_vel = self.robot.data.root_lin_vel_w[0]
+                torques_max = float(self.torques[0].abs().max()) if hasattr(self, 'torques') else 0
+                actions_max = float(self.actions[0].abs().max()) if self.actions.numel() > 0 else 0
+                try:
+                    contact_force = float(self._contact_sensor.data.net_forces_w[0].norm(dim=-1).max())
+                except Exception:
+                    contact_force = 0.0
+                print(
+                    f"[phys-diag] step={self._apply_action_step:>3d} "
+                    f"root_z={float(root_pos[2]):.4f} "
+                    f"root_vel_z={float(root_vel[2]):+.4f} "
+                    f"torque_max={torques_max:.3f} "
+                    f"action_max={actions_max:.3f} "
+                    f"contact_force_max={contact_force:.3f}",
+                    flush=True,
+                )
+            if self._apply_action_step >= 40:
+                self._apply_action_diag_done = True
 
     # ---- Legacy VecEnv-style API expected by rsl_rl ----
 
@@ -633,35 +669,35 @@ class LeggedRobotEnv(DirectRLEnv):
         )
         self._joint_order_is_identity = train_order == lab_names
 
-    def _init_buffers(self):
-        """Initialize torch tensors for simulation states."""
-        self._setup_joint_order_remap()
-
-        # Access robot data directly (no gymtorch.wrap_tensor needed)
+    def _refresh_sim_state_tensors(self):
+        """Refresh IsaacLab timestamped state tensors before using legacy buffer names."""
         self.root_states = self.robot.data.root_state_w
         self.dof_pos = self.robot.data.joint_pos[:, self._lab_to_train_perm].clone()
         self.dof_vel = self.robot.data.joint_vel[:, self._lab_to_train_perm].clone()
-        # Contact forces from ContactSensor (shape: num_envs, num_bodies, 3)
         self.contact_forces = self._contact_sensor.data.net_forces_w
 
-        # Rigid body states
         self.rigid_body_pos = self.robot.data.body_pos_w
         self.rigid_body_vel = self.robot.data.body_lin_vel_w
         self.rigid_body_quat = self.robot.data.body_quat_w
 
-        # Derived quantities
-        # Note: IsaacLab uses wxyz quaternion convention
         self.base_quat = self.root_states[:, 3:7]
         self.rpy = get_euler_xyz_in_tensor(self.base_quat)
         self.base_pos = self.root_states[:, 0:3]
         self.base_lin_vel = self._quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel = self._quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
 
+        if hasattr(self, "gravity_vec"):
+            self.projected_gravity = self._quat_rotate_inverse(self.base_quat, self.gravity_vec)
+
+    def _init_buffers(self):
+        """Initialize torch tensors for simulation states."""
+        self._setup_joint_order_remap()
+
         self.gravity_vec = torch.zeros(self.num_envs, 3, device=self.device)
         self.gravity_vec[:, 2] = -1.0
         self.forward_vec = torch.zeros(self.num_envs, 3, device=self.device)
         self.forward_vec[:, 0] = 1.0
-        self.projected_gravity = self._quat_rotate_inverse(self.base_quat, self.gravity_vec)
+        self._refresh_sim_state_tensors()
 
         # Body/DOF names and indices (from Articulation)
         self.body_names = list(self.robot.data.body_names)
@@ -956,8 +992,7 @@ class LeggedRobotEnv(DirectRLEnv):
     # ---- Callbacks ----
 
     def _post_step_update(self):
-        self.dof_pos[:] = self.robot.data.joint_pos[:, self._lab_to_train_perm]
-        self.dof_vel[:] = self.robot.data.joint_vel[:, self._lab_to_train_perm]
+        self._refresh_sim_state_tensors()
 
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
@@ -1199,26 +1234,24 @@ class LeggedRobotEnv(DirectRLEnv):
     # ---- Terrain creation ----
 
     def _create_trimesh(self):
-        """Add triangle mesh terrain to the simulation using IsaacLab's TerrainImporter."""
+        """Add triangle mesh terrain to the simulation."""
         import trimesh
         from isaaclab.terrains.utils import create_prim_from_mesh
         import isaaclab.sim as sim_utils
         from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
-        # Get pre-computed vertices and triangles from the DeepMimicTerrain object
         vertices = self.terrain.vertices
         triangles = self.terrain.triangles
 
-        # Create a trimesh.Trimesh object
-        terrain_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
+        z_min, z_max = vertices[:, 2].min(), vertices[:, 2].max()
+        print(f"[terrain] mesh z range: [{z_min:.4f}, {z_max:.4f}], vertices={len(vertices)}, triangles={len(triangles)}")
 
-        # Import the terrain mesh directly as a prim (bypassing TerrainImporter, which
-        # in current IsaacLab requires a terrain_generator when terrain_type=="generator").
+        terrain_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
         create_prim_from_mesh(
             "/World/ground/deepmimic_terrain",
             terrain_mesh,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 0.0)),
-            physics_material=RigidBodyMaterialCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.3, 0.3, 0.3)),
+            physics_material=RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0),
         )
 
         # Configure env origins from terrain offsets

@@ -74,10 +74,6 @@ class PlayManager:
             self.env_cfg.deepmimic.viz_replay = True
             self.env_cfg.deepmimic.viz_replay_sync_robot = True
 
-            if self.env_cfg.deepmimic.viz_replay_sync_robot:
-                self.env_cfg.control.stiffness = {k: 0.0 for k in self.env_cfg.control.stiffness}
-                self.env_cfg.control.damping = {k: 0.0 for k in self.env_cfg.control.damping}
-
             self.env_cfg.terrain.num_rows = 5
             self.env_cfg.terrain.num_cols = 5
             self.env_cfg.terrain.curriculum = False
@@ -151,16 +147,16 @@ class PlayManager:
             def _g(k):
                 v = crv.get(k)
                 return float(v[0]) if v is not None else float('nan')
-            print(
-                f"[diag] step={self.t:>5d} "
-                f"rew={float(rews[0]):+.3f} "
-                f"joint_track={_g('joint_pos_tracking'):+.3f} "
-                f"link_track={_g('link_pos_tracking'):+.3f} "
-                f"torso_ori={_g('torso_orientation_tracking'):+.3f} "
-                f"action_abs_max={float(actions.abs().max()):.3f} "
-                f"done={int(dones[0])}",
-                flush=True,
-            )
+            # print(
+            #     f"[diag] step={self.t:>5d} "
+            #     f"rew={float(rews[0]):+.3f} "
+            #     f"joint_track={_g('joint_pos_tracking'):+.3f} "
+            #     f"link_track={_g('link_pos_tracking'):+.3f} "
+            #     f"torso_ori={_g('torso_orientation_tracking'):+.3f} "
+            #     f"action_abs_max={float(actions.abs().max()):.3f} "
+            #     f"done={int(dones[0])}",
+            #     flush=True,
+            # )
 
     def run(self):
         """Main simulation loop."""
