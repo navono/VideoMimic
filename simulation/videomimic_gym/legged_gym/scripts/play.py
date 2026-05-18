@@ -141,6 +141,9 @@ class PlayManager:
         actions = self.policy({k: v.detach() for k, v in obs.items()}, monitor_activations=False)
         obs, rews, dones, infos = self.env.step(actions.detach())
 
+        if hasattr(self.env, 'viser_viz'):
+            self.env.viser_viz.update_from_torch(self.env.root_states, self.env.dof_pos, env_idx=0)
+
         self.t += 1
         if self.t % 50 == 0:
             crv = getattr(self.env, 'current_reward_value', {}) or {}

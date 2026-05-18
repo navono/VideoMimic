@@ -87,7 +87,7 @@ class LeggedRobotEnv(DirectRLEnv):
             from viser.extras import ViserUrdf
             from robot_descriptions.loaders.yourdfpy import load_robot_description
             self.viser_viz = LeggedRobotViser(
-                urdf_path=cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR),
+                urdf_path=self._resolve_viser_urdf_path(),
                 dt=cfg.control.decimation * direct_cfg.sim.dt
             )
             self.viser_viz.init_isaaclab_robot(self)
@@ -162,6 +162,18 @@ class LeggedRobotEnv(DirectRLEnv):
         ):
             if not hasattr(self.cfg, attr) and hasattr(direct_cfg, attr):
                 setattr(self.cfg, attr, getattr(direct_cfg, attr))
+
+    def _resolve_viser_urdf_path(self) -> str:
+        """Return a full visual URDF for Viser without changing the sim asset."""
+        sim_urdf = self._robot_cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        if os.path.basename(sim_urdf).startswith("g1_29dof_anneal_23dof"):
+            visual_urdf = os.path.join(
+                LEGGED_GYM_ROOT_DIR,
+                "resources/robots/g1_description/g1_29dof_with_hand.urdf",
+            )
+            if os.path.exists(visual_urdf):
+                return visual_urdf
+        return sim_urdf
 
     @property
     def max_episode_length_s(self) -> float:

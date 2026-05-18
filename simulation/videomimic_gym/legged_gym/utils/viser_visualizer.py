@@ -525,9 +525,38 @@ class LeggedRobotViser:
     def init_isaacgym_robot(self, robot):
         """Setup robot instance (IsaacGym or IsaacLab)"""
         self.robot = robot
+        self.root_quat_order = "xyzw"
+        self._setup_robot_joint_mapping()
 
-    # Alias for IsaacLab compatibility
-    init_isaaclab_robot = init_isaacgym_robot
+    def init_isaaclab_robot(self, robot):
+        """Setup an IsaacLab robot instance.
+
+        IsaacLab stores root quaternions as wxyz, while the legacy IsaacGym
+        tensors used xyzw. Keep the distinction explicit for Viser.
+        """
+        self.robot = robot
+        self.root_quat_order = "wxyz"
+        self._setup_robot_joint_mapping()
+
+    def _setup_robot_joint_mapping(self):
+        """Map simulation joint order into the URDF used only for visualization."""
+        self._urdf_joint_names = list(self.urdf.actuated_joint_names)
+        self._robot_joint_names = list(getattr(self.robot, "dof_names", self._urdf_joint_names))
+        robot_joint_to_idx = {name: idx for idx, name in enumerate(self._robot_joint_names)}
+        self._robot_to_urdf_joint_indices = [
+            robot_joint_to_idx.get(name) for name in self._urdf_joint_names
+        ]
+
+    def _make_urdf_cfg(self, dof_pos_np: np.ndarray) -> np.ndarray:
+        """Expand robot DOF positions into the visual URDF's actuated order."""
+        if len(dof_pos_np) == len(self._urdf_joint_names):
+            return dof_pos_np
+
+        urdf_cfg = np.zeros(len(self._urdf_joint_names), dtype=dof_pos_np.dtype)
+        for urdf_idx, robot_idx in enumerate(self._robot_to_urdf_joint_indices):
+            if robot_idx is not None and robot_idx < len(dof_pos_np):
+                urdf_cfg[urdf_idx] = dof_pos_np[robot_idx]
+        return urdf_cfg
 
     def set_viewer_camera(self, position: Union[np.ndarray, List[float]], lookat: Union[np.ndarray, List[float]]):
         """
@@ -1070,10 +1099,13 @@ class LeggedRobotViser:
             
         root_pos = root_states[env_idx, :3].cpu().numpy()
         root_quat = root_states[env_idx, 3:7].cpu().numpy()
-        dof_pos_np = dof_pos[env_idx].cpu().numpy()
+        dof_pos_np = self._make_urdf_cfg(dof_pos[env_idx].cpu().numpy())
         
-        # Convert quaternion from (x,y,z,w) to (w,x,y,z) for Viser
-        viser_quat = np.array([root_quat[3], root_quat[0], root_quat[1], root_quat[2]])
+        if getattr(self, "root_quat_order", "xyzw") == "wxyz":
+            viser_quat = root_quat
+        else:
+            # Convert quaternion from legacy IsaacGym xyzw to Viser wxyz.
+            viser_quat = np.array([root_quat[3], root_quat[0], root_quat[1], root_quat[2]])
 
         # Update IsaacGym visualization
         self._isaac_world_node.position = root_pos
