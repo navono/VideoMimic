@@ -638,7 +638,8 @@ class LeggedRobotViser:
                 )
 
                 self.use_kinematic_replay = self.server.gui.add_checkbox(
-                    "Use Kinematic Replay", initial_value=False,
+                    "Use Kinematic Replay",
+                    initial_value=bool(getattr(self.robot, "viz_replay_sync_robot", False)),
                     hint="Toggle between kinematic replay and physics simulation"
                 )
 

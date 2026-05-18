@@ -72,6 +72,7 @@ class PlayManager:
         """Configure environment parameters based on the task."""
         if 'deepmimic' in task:
             self.env_cfg.deepmimic.viz_replay = True
+            self.env_cfg.deepmimic.viz_replay_sync_robot = True
 
             if self.env_cfg.deepmimic.viz_replay_sync_robot:
                 self.env_cfg.control.stiffness = {k: 0.0 for k in self.env_cfg.control.stiffness}

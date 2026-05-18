@@ -219,6 +219,13 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
             joint_ids = None if self._joint_order_is_identity else self._lab_to_train_perm.tolist()
             self.robot.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids, joint_ids=joint_ids)
 
+            # Keep the legacy buffers in sync for the Viser renderer. IsaacLab
+            # writes do not refresh these views until the next simulation tick.
+            self.root_states[env_ids, :7] = root_pose
+            self.root_states[env_ids, 7:13] = root_vel
+            self.dof_pos[env_ids] = dof_pos
+            self.dof_vel[env_ids] = dof_vel
+
     def set_visualization_episode(self, episode_idx: int, start_offset: int = 0):
         print(f'Setting episode {episode_idx} with start offset {start_offset}')
         self.selected_episode_idx = episode_idx
