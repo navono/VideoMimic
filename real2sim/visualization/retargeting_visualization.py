@@ -601,31 +601,30 @@ def main(
         for camera_frustm in camera_frustums:
             camera_frustm.visible = False
 
-        target_positions = onp.array([smpl_mesh_handle_list[i].vertices.mean(axis=0) for i in range(num_frames)])
-    
-        # Calculate average FOV from camera intrinsics if available
-        if world_env is not None:
-            fov_degrees_list = []
-            
-            for frame_name in world_env.keys():
-                K = world_env[frame_name]['intrinsic']
-                # Calculate vertical FOV from intrinsics
-                vfov_rad = 2 * onp.arctan(K[1, 2] / K[1, 1])
-                vfov_degrees = onp.degrees(vfov_rad)
-                fov_degrees_list.append(vfov_degrees)
-            avg_fov = onp.mean(fov_degrees_list)
-        else:
-            avg_fov = 45.0  # Default FOV
-        
-        # Set up camera to follow the target position
-        stop_camera_follow, resume_camera_follow = viser_camera_util.setup_camera_follow(
-            server=server,
-            slider=gui_timestep,
-            target_positions=target_positions,
-            camera_positions=trans_list,
-            camera_wxyz=quat_list,
-            fov=avg_fov
-        )
+        target_positions = onp.array([smpl_mesh_handle_list[i].vertices.mean(axis=0) for i in range(num_frames)]) if 'smpl_mesh_handle_list' in locals() else None
+
+        if target_positions is not None:
+            # Calculate average FOV from camera intrinsics if available
+            if world_env is not None:
+                fov_degrees_list = []
+
+                for frame_name in world_env.keys():
+                    K = world_env[frame_name]['intrinsic']
+                    vfov_rad = 2 * onp.arctan(K[1, 2] / K[1, 1])
+                    vfov_degrees = onp.degrees(vfov_rad)
+                    fov_degrees_list.append(vfov_degrees)
+                avg_fov = onp.mean(fov_degrees_list)
+            else:
+                avg_fov = 45.0
+
+            stop_camera_follow, resume_camera_follow = viser_camera_util.setup_camera_follow(
+                server=server,
+                slider=gui_timestep,
+                target_positions=target_positions,
+                camera_positions=trans_list,
+                camera_wxyz=quat_list,
+                fov=avg_fov
+            )
 
     # Update the scene
     prev_timestep = gui_timestep.value
@@ -661,8 +660,10 @@ def main(
             if smpl_joints3d is not None and smpl_verts is not None:
                 update_smpl_mesh(current_timestep)
                 update_smpl_joints(current_timestep)
-        
-            if len(smpl_mesh_handle_list) == num_frames or len(smpl_joints3d_handle_list) == num_frames:
+
+            if 'smpl_mesh_handle_list' in locals() and len(smpl_mesh_handle_list) == num_frames:
+                setup_camera_follow()
+            elif 'smpl_joints3d_handle_list' in locals() and len(smpl_joints3d_handle_list) == num_frames:
                 setup_camera_follow()
 
         server.flush()  # Optional!

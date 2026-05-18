@@ -86,8 +86,8 @@ def main(text: str="person.", video_dir: str="./demo_data/input_images/arthur_ty
 
     # init grounding dino model from huggingface
     model_id = "IDEA-Research/grounding-dino-tiny"
-    processor = AutoProcessor.from_pretrained(model_id)
-    grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
+    processor = AutoProcessor.from_pretrained(model_id, local_files_only=True)
+    grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, local_files_only=True).to(device)
 
     # create the output directory
     CommonUtils.creat_dirs(output_dir)

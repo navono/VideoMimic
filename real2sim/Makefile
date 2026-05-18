@@ -1,5 +1,6 @@
 # Real2Sim Pipeline Makefile
 # Usage:
+#   make run VIDEO=video.mp4 NAME=my_video        # one command: extract + full pipeline
 #   make extract-frames VIDEO=video.mp4 NAME=my_video
 #   make pipeline NAME=my_video
 #   make pipeline NAME=my_video START=50 END=200
@@ -336,7 +337,22 @@ stage4:
 # Full Pipeline
 # ============================================================
 
-.PHONY: pipeline
+.PHONY: pipeline run
+
+## One command: extract frames + full pipeline
+run:
+	@if [ -z "$(VIDEO)" ]; then echo "Usage: make run VIDEO=path/to/video.mp4 NAME=my_video"; exit 1; fi
+	@echo "=== Step 1: Extracting frames ==="
+	@TOTAL=$$(ffprobe -v error -count_frames -select_streams v:0 \
+	    -show_entries stream=nb_read_frames -of csv=p=0 "$(VIDEO)" | tr -d '[:space:]') && \
+	END_IDX=$$((TOTAL - 1)) && \
+	echo "Video has $$TOTAL frames, extracting frames $(START)-$$END_IDX..." && \
+	$(CONDA_ACTIVATE_VM1RS) && \
+	python utilities/extract_frames_from_video.py \
+	    --video-path "$(VIDEO)" \
+	    --output-dir "$(DATA_DIR)/cam01" \
+	    --start-frame $(START) --end-frame $$END_IDX
+	@$(MAKE) pipeline NAME=$(NAME) START=$(START) END=$(END) STRIDE=$(STRIDE) ROBOT=$(ROBOT) HEIGHT=$(HEIGHT) GENDER=$(GENDER) LOCALHUB=$(LOCALHUB)
 
 ## Run the complete pipeline (Stage 0 -> 4)
 pipeline: stage0 stage1 stage2 stage3 stage4
@@ -382,6 +398,7 @@ vis-mesh:
 vis-retarget:
 	@$(CONDA_ACTIVATE_VM1RS) && \
 	python visualization/retargeting_visualization.py \
+	    --megahunter-path "$(MH_H5)" \
 	    --postprocessed-dir "$(CALIB_DIR)" \
 	    --robot-name $(ROBOT) --bg-pc-downsample-factor 4 --confidence-threshold 0.0
 
@@ -461,7 +478,8 @@ help:
 	@echo "  make verify-vm1recon      Verify vm1recon imports"
 	@echo ""
 	@echo "Pipeline (END defaults to auto-detect):"
-	@echo "  make extract-frames VIDEO=x.mp4 NAME=my_video   Extract frames"
+	@echo "  make run VIDEO=x.mp4 NAME=my_video              Extract frames + run all stages"
+	@echo "  make extract-frames VIDEO=x.mp4 NAME=my_video   Extract frames only"
 	@echo "  make pipeline NAME=my_video                     Run all stages"
 	@echo "  make stage0 NAME=my_video                       Preprocessing"
 	@echo "  make stage1 NAME=my_video                       MegaSam reconstruction"
@@ -487,6 +505,7 @@ help:
 	@echo "  make count-frames NAME=my_video  Count extracted frames"
 	@echo ""
 	@echo "Examples:"
+	@echo "  make run VIDEO=video.mp4 NAME=sitting_standing"
 	@echo "  make extract-frames VIDEO=video.mp4 NAME=sitting_standing"
 	@echo "  make pipeline NAME=sitting_standing"
 	@echo "  make pipeline NAME=sitting_standing STRIDE=2 HEIGHT=0"

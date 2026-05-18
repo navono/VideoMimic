@@ -891,8 +891,18 @@ def process_retargeting(
     # Extract the frame indices used; input path contains information about the frames used
     # ex) megahunter_align3r_reconstruction_results_IMG_7381-00.00.10.330-00.00.15.516-seg2_cam01_frame_0_178_subsample_2
     src_dir_str = str(src_dir) # Use string for splitting
-    start_frame = int(src_dir_str.split("_frame_")[1].split("_subsample_")[0].split("_")[0])
-    end_frame = int(src_dir_str.split("_frame_")[1].split("_subsample_")[0].split("_")[1])
+    if "_frame_" in src_dir_str:
+        start_frame = int(src_dir_str.split("_frame_")[1].split("_subsample_")[0].split("_")[0])
+        end_frame = int(src_dir_str.split("_frame_")[1].split("_subsample_")[0].split("_")[1])
+    else:
+        # Fallback: infer from keypoints h5 data
+        keypoints_path = src_dir / "gravity_calibrated_keypoints.h5"
+        with h5py.File(keypoints_path, 'r') as f:
+            # Get first person's joint data to determine frame count
+            first_key = list(f['joints'].keys())[0]
+            num_frames = f[f'joints/{first_key}'].shape[0]
+        start_frame = 0
+        end_frame = num_frames
 
     print("--- Background Mesh Loading ---")
     keypoints_path = src_dir / "gravity_calibrated_keypoints.h5"
@@ -1683,7 +1693,7 @@ def main(
 
     if pattern is None:
         assert src_dir and contact_dir, "src_dir and contact_dir must be provided when pattern is not specified."
-        subsample_factor = int(str(src_dir).split("_subsample_")[1])
+        subsample_factor = int(str(src_dir).split("_subsample_")[1]) if "_subsample_" in str(src_dir) else 1
         process_retargeting_partial(
             src_dir=src_dir,
             contact_dir=contact_dir,

@@ -219,8 +219,12 @@ def load_megahunter_data(megahunter_path: Path, person_id: str, device: str) -> 
     
     # Load contact estimation if available
     video_name = megahunter_path.parent.name
-    # split results and cam01
-    contact_dir = megahunter_path.parent.parent.parent / 'input_contacts' / video_name.split('_results_')[1].split('_cam')[0] / 'cam01'
+    # Try new directory layout first (Makefile structure), then fall back to old layout
+    contact_dir_new = megahunter_path.parent.parent / 'contacts' / 'cam01'
+    if contact_dir_new.exists():
+        contact_dir = contact_dir_new
+    else:
+        contact_dir = megahunter_path.parent.parent.parent / 'input_contacts' / video_name.split('_results_')[1].split('_cam')[0] / 'cam01'
     
     contact_estimation = None
     if contact_dir.exists():

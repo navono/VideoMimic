@@ -354,19 +354,20 @@ if __name__ == '__main__':
             for f in img_path_list:
                 # Extract the base path and frame number
                 base_path = f.split('/cam01/')[0]
-                # replace input_images with input_masks
-                base_path = base_path.replace('input_images', 'input_masks')
-                
+
+                # Support both old (input_images -> input_masks) and new directory layouts
+                mask_base = base_path.replace('input_images', 'input_masks')
+                mask_dir_old = f"{mask_base}/cam01/mask_data"
+                mask_dir_new = f"{base_path}/masks/cam01/mask_data"
+                mask_dir = mask_dir_new if osp.isdir(mask_dir_new) else mask_dir_old
+
                 # Handle different filename formats
                 if 'frame_' in f:
-                    # Format: frame_xxxxx.jpg or frame_xxxxx.png
                     frame_num = int(f.split('frame_')[1].split('.')[0])
                 else:
-                    # Format: xxxxx.jpg or xxxxx.png
                     frame_num = int(os.path.basename(f).split('.')[0])
-                
-                # Construct the mask path
-                mask_path = f"{base_path}/cam01/mask_data/mask_{frame_num:05d}.npz"
+
+                mask_path = f"{mask_dir}/mask_{frame_num:05d}.npz"
                 dynamic_mask_root.append(mask_path)
 
             if len(dynamic_mask_root) > 0:
