@@ -885,9 +885,9 @@ class ReplayDataLoader:
             else:
                 episode_indices = torch.randint(0, num_episodes, (num_envs_to_reset,), device=self.device)
 
-            episode_start_indices = torch.tensor(self.file_start_indices, device=self.device)
-            episode_end_indices = torch.tensor(self.file_end_indices, device=self.device)
-            episode_lengths = torch.tensor(self.sequence_lengths, device=self.device)
+            episode_start_indices = torch.as_tensor(self.file_start_indices, device=self.device)
+            episode_end_indices = torch.as_tensor(self.file_end_indices, device=self.device)
+            episode_lengths = torch.as_tensor(self.sequence_lengths, device=self.device)
 
             sampled_global_indices = episode_start_indices[episode_indices]
             global_end_indices = episode_end_indices[episode_indices]

@@ -362,7 +362,9 @@ class MultiLinkHeightSensor(RaycastingSensor):
             env_ids: Environment IDs to update. If ... (Ellipsis), updates all environments.
         """
 
-        self.link_indices = [self.robot.body_names.index(name) for name in self.link_names]
+        if not hasattr(self, "link_indices"):
+            link_names = self.robot._resolve_body_names(self.link_names) if hasattr(self.robot, "_resolve_body_names") else self.link_names
+            self.link_indices = [self.robot.body_names.index(name) for name in link_names]
 
         # Calculate batch size
         batch_size = len(env_ids) if env_ids is not ... else self.robot.num_envs
@@ -461,4 +463,4 @@ class DepthCameraSensor(RaycastingSensor):
         depths = torch.clamp(distances / self.cfg.max_distance * 255, 0, 255)
         
         # Reshape into image
-        self.depth_map[env_ids] = depths.view(-1, self.cfg.height, self.cfg.width) 
+        self.depth_map[env_ids] = depths.view(-1, self.cfg.height, self.cfg.width)

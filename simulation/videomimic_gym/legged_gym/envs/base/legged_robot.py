@@ -8,6 +8,7 @@ with IsaacLab's Articulation/Scene/SimulationContext APIs.
 import math
 import os
 import time
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import torch
@@ -72,6 +73,7 @@ class LeggedRobotEnv(DirectRLEnv):
         # Override self.cfg to point to the original LeggedRobotCfg
         # so that all downstream code (reward/obs functions, child classes) work unchanged
         self.cfg = cfg
+        self._mirror_direct_rl_runtime_cfg(direct_cfg)
 
         # Initialize buffers after scene is set up
         self._init_buffers()
@@ -128,7 +130,6 @@ class LeggedRobotEnv(DirectRLEnv):
         class _RLEnvCfg(DirectRLEnvCfg):
             sim: SimulationCfg = SimulationCfg(
                 dt=cfg.sim.dt,
-                substeps=cfg.sim.substeps,
                 gravity=cfg.sim.gravity,
             )
             scene: InteractiveSceneCfg = _SceneCfg()
@@ -140,6 +141,80 @@ class LeggedRobotEnv(DirectRLEnv):
             ui_window_class_type = None
 
         return _RLEnvCfg()
+
+    def _mirror_direct_rl_runtime_cfg(self, direct_cfg: DirectRLEnvCfg) -> None:
+        """Fill IsaacLab runtime cfg fields missing from the VideoMimic config."""
+        for attr in (
+            "decimation",
+            "events",
+            "action_noise_model",
+            "observation_noise_model",
+            "ui_window_class_type",
+            "rerender_on_reset",
+            "wait_for_textures",
+            "action_space",
+            "observation_space",
+            "state_space",
+            "is_finite_horizon",
+            "seed",
+            "xr",
+            "scene",
+        ):
+            if not hasattr(self.cfg, attr) and hasattr(direct_cfg, attr):
+                setattr(self.cfg, attr, getattr(direct_cfg, attr))
+
+    @property
+    def max_episode_length_s(self) -> float:
+        """Maximum episode length in seconds from the VideoMimic config."""
+        return self._robot_cfg.env.episode_length_s
+
+    @property
+    def max_episode_length(self):
+        """Maximum episode length in policy steps from the VideoMimic config."""
+        return math.ceil(self.max_episode_length_s / self.dt)
+
+    def _get_urdf_parent_links(self) -> dict[str, str]:
+        if hasattr(self, "_urdf_parent_links"):
+            return self._urdf_parent_links
+
+        parent_links = {}
+        asset_path = self._robot_cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        if os.path.exists(asset_path) and asset_path.endswith((".urdf", ".xml")):
+            try:
+                root = ET.parse(asset_path).getroot()
+                for joint in root.findall("joint"):
+                    parent = joint.find("parent")
+                    child = joint.find("child")
+                    if parent is not None and child is not None:
+                        parent_links[child.attrib["link"]] = parent.attrib["link"]
+            except Exception as exc:
+                print(f"[legged_robot] WARNING: could not parse body parent links from {asset_path}: {exc}")
+
+        self._urdf_parent_links = parent_links
+        return parent_links
+
+    def _resolve_body_name(self, name: str) -> str:
+        if not hasattr(self, "body_names"):
+            raise RuntimeError("Body names are not available until IsaacLab finishes articulation initialization")
+
+        body_names = set(self.body_names)
+        if name in body_names:
+            return name
+
+        parent_links = self._get_urdf_parent_links()
+        current = name
+        visited = set()
+        while current in parent_links and current not in visited:
+            visited.add(current)
+            current = parent_links[current]
+            if current in body_names:
+                print(f"[legged_robot] Mapping merged body '{name}' to '{current}'")
+                return current
+
+        raise ValueError(f"Body '{name}' is not in the IsaacLab articulation body list")
+
+    def _resolve_body_names(self, names: Sequence[str]) -> list[str]:
+        return [self._resolve_body_name(name) for name in names]
 
     # ---- DirectRLEnv required methods ----
 
@@ -214,12 +289,36 @@ class LeggedRobotEnv(DirectRLEnv):
 
     def _apply_action(self) -> None:
         """Apply actions to the robot at each physics time-step."""
+        joint_ids = None if self._joint_order_is_identity else self._lab_to_train_perm.tolist()
         if not self.cfg.control.control_type == 'POS':
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
-            self.robot.set_joint_effort_target(self.torques)
+            self.robot.set_joint_effort_target(self.torques, joint_ids=joint_ids)
         else:
             self.dof_pos_targets = self._compute_dof_pos_targets(self.actions).view(self.dof_pos_targets.shape)
-            self.robot.set_joint_position_target(self.dof_pos_targets)
+            self.robot.set_joint_position_target(self.dof_pos_targets, joint_ids=joint_ids)
+
+    # ---- Legacy VecEnv-style API expected by rsl_rl ----
+
+    def get_observations(self) -> dict:
+        """Refresh obs_dict and return it for legacy rsl_rl callers."""
+        self._get_observations()
+        return self.obs_dict
+
+    def get_privileged_observations(self):
+        """Return critic observations if configured."""
+        return self.obs_dict.get("torso_privileged", None)
+
+    def get_obs_shapes(self) -> dict:
+        """Return per-observation tensor shapes excluding the env batch dim."""
+        if not self.obs_dict:
+            self._get_observations()
+        return {name: tuple(obs.shape[1:]) for name, obs in self.obs_dict.items()}
+
+    def step(self, actions):
+        """Legacy rsl_rl step wrapper returning (obs_dict, reward, done, info)."""
+        _obs, reward, terminated, time_outs, info = super().step(actions)
+        done = terminated | time_outs
+        return self.obs_dict, reward, done, info
 
     def _get_observations(self) -> dict:
         """Compute and return observations."""
@@ -252,7 +351,12 @@ class LeggedRobotEnv(DirectRLEnv):
         obs_list = []
         for name in self.cfg.env.obs:
             if name in self.obs_dict:
-                obs_list.append(self.obs_dict[name])
+                obs = self.obs_dict[name]
+                if obs.dim() == 1:
+                    obs = obs.unsqueeze(-1)
+                elif obs.dim() > 2:
+                    obs = obs.reshape(obs.shape[0], -1)
+                obs_list.append(obs)
         if obs_list:
             policy_obs = torch.cat(obs_list, dim=-1)
         else:
@@ -319,7 +423,8 @@ class LeggedRobotEnv(DirectRLEnv):
         joint_pos = self.default_dof_pos[env_ids] * torch_rand_float(0.5, 1.5, (len(env_ids), self.num_dof), device=self.device)
         joint_vel = torch.zeros(len(env_ids), self.num_dof, device=self.device)
 
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        joint_ids = None if self._joint_order_is_identity else self._lab_to_train_perm.tolist()
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids, joint_ids=joint_ids)
 
         # Reset root states
         default_root_state = self.robot.data.default_root_state[env_ids].clone()
@@ -354,7 +459,11 @@ class LeggedRobotEnv(DirectRLEnv):
         if self.cfg.commands.curriculum:
             self.extras["episode"]["Episode/max_command_x"] = self.command_ranges["lin_vel_x"][1]
         if self.cfg.env.send_timeouts:
-            self.extras["time_outs"] = self.time_out_buf
+            self.extras["time_outs"] = getattr(
+                self,
+                "reset_time_outs",
+                torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            )
 
         if self.history_handler is not None:
             self.history_handler.reset(env_ids)
@@ -379,14 +488,14 @@ class LeggedRobotEnv(DirectRLEnv):
             for dof_name, stiffness in self._robot_cfg.control.stiffness.items():
                 damping = self._robot_cfg.control.damping[dof_name]
                 actuator_configs[dof_name] = ImplicitActuatorCfg(
-                    joint_names_expr=[f"*{dof_name}*"],
+                    joint_names_expr=[f".*{dof_name}.*"],
                     stiffness=stiffness,
                     damping=damping,
                 )
         else:
             # Effort mode — all joints get zero stiffness
             actuator_configs["all_joints"] = ImplicitActuatorCfg(
-                joint_names_expr=["*"],
+                joint_names_expr=[".*"],
                 effort_limit_sim=100.0,
                 stiffness=0.0,
                 damping=0.0,
@@ -396,6 +505,13 @@ class LeggedRobotEnv(DirectRLEnv):
         if asset_path.endswith('.urdf') or asset_path.endswith('.xml'):
             spawn_cfg = UrdfFileCfg(
                 asset_path=asset_path,
+                fix_base=asset_cfg.fix_base_link,
+                joint_drive=UrdfFileCfg.JointDriveCfg(
+                    gains=UrdfFileCfg.JointDriveCfg.PDGainsCfg(
+                        stiffness=0.0,
+                        damping=0.0,
+                    ),
+                ),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     rigid_body_enabled=True,
                     max_linear_velocity=asset_cfg.max_linear_velocity,
@@ -413,6 +529,7 @@ class LeggedRobotEnv(DirectRLEnv):
                     stabilization_threshold=0.001,
                     fix_root_link=asset_cfg.fix_base_link,
                 ),
+                activate_contact_sensors=True,
             )
         else:
             spawn_cfg = sim_utils.UsdFileCfg(
@@ -434,7 +551,28 @@ class LeggedRobotEnv(DirectRLEnv):
                     stabilization_threshold=0.001,
                     fix_root_link=asset_cfg.fix_base_link,
                 ),
+                activate_contact_sensors=True,
             )
+
+        # Filter default_joint_angles to joints that actually exist in the URDF.
+        # Current IsaacLab strictly errors on any unmatched joint name (see
+        # isaaclab.utils.string.resolve_matching_names_values), whereas older versions
+        # silently ignored them. We parse the URDF/MJCF to obtain the real joint list.
+        joint_pos = dict(self._robot_cfg.init_state.default_joint_angles)
+        if asset_path.endswith('.urdf') or asset_path.endswith('.xml'):
+            try:
+                import xml.etree.ElementTree as ET
+                root = ET.parse(asset_path).getroot()
+                urdf_joints = {j.get('name') for j in root.iter('joint') if j.get('name')}
+                # Drop fixed joints (no DOF) when type info is available.
+                fixed_joints = {j.get('name') for j in root.iter('joint') if j.get('type') == 'fixed'}
+                urdf_joints -= fixed_joints
+                missing = [k for k in joint_pos if k not in urdf_joints]
+                if missing:
+                    print(f"[legged_robot] Dropping joint_pos entries not present in URDF: {missing}")
+                joint_pos = {k: v for k, v in joint_pos.items() if k in urdf_joints}
+            except Exception as e:
+                print(f"[legged_robot] Warning: could not parse URDF joints for filtering: {e}")
 
         articulation_cfg = ArticulationCfg(
             prim_path="/World/envs/env_.*/Robot",
@@ -444,19 +582,53 @@ class LeggedRobotEnv(DirectRLEnv):
                 # Config stores quaternion as xyzw (IsaacGym convention);
                 # IsaacLab expects wxyz, so we reorder.
                 rot=tuple(self._robot_cfg.init_state.rot[3:4] + self._robot_cfg.init_state.rot[:3]),
-                joint_pos=self._robot_cfg.init_state.default_joint_angles,
+                joint_pos=joint_pos,
             ),
             actuators=actuator_configs,
         )
 
         return articulation_cfg
 
+    def _setup_joint_order_remap(self):
+        """Resolve URDF/training joint order to IsaacLab articulation joint order."""
+        lab_names = list(self.robot.data.joint_names)
+        train_order = []
+
+        asset_path = self._robot_cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+        if os.path.exists(asset_path) and asset_path.endswith((".urdf", ".xml")):
+            try:
+                root = ET.parse(asset_path).getroot()
+                for joint in root.findall("joint"):
+                    if joint.get("type") in ("revolute", "continuous", "prismatic"):
+                        name = joint.get("name")
+                        if name in lab_names:
+                            train_order.append(name)
+            except Exception as exc:
+                print(f"[joint-order] WARNING: could not parse {asset_path}: {exc}")
+
+        if len(train_order) != len(lab_names):
+            print(
+                f"[joint-order] WARNING: URDF order ({len(train_order)} joints) "
+                f"does not match lab order ({len(lab_names)} joints); falling back to IsaacLab order."
+            )
+            train_order = list(lab_names)
+
+        self._train_dof_names = train_order
+        self._lab_to_train_perm = torch.tensor(
+            [lab_names.index(name) for name in train_order],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._joint_order_is_identity = train_order == lab_names
+
     def _init_buffers(self):
         """Initialize torch tensors for simulation states."""
+        self._setup_joint_order_remap()
+
         # Access robot data directly (no gymtorch.wrap_tensor needed)
         self.root_states = self.robot.data.root_state_w
-        self.dof_pos = self.robot.data.joint_pos
-        self.dof_vel = self.robot.data.joint_vel
+        self.dof_pos = self.robot.data.joint_pos[:, self._lab_to_train_perm].clone()
+        self.dof_vel = self.robot.data.joint_vel[:, self._lab_to_train_perm].clone()
         # Contact forces from ContactSensor (shape: num_envs, num_bodies, 3)
         self.contact_forces = self._contact_sensor.data.net_forces_w
 
@@ -481,7 +653,7 @@ class LeggedRobotEnv(DirectRLEnv):
 
         # Body/DOF names and indices (from Articulation)
         self.body_names = list(self.robot.data.body_names)
-        self.dof_names = list(self.robot.data.joint_names)
+        self.dof_names = list(self._train_dof_names)
         self.num_bodies = len(self.body_names)
         self.num_dof = self.robot.num_joints
         self.num_dofs = self.num_dof
@@ -523,9 +695,12 @@ class LeggedRobotEnv(DirectRLEnv):
             self.termination_contact_indices = torch.tensor([], dtype=torch.long, device=self.device)
 
         # Joint limits
-        self.dof_pos_limits = self.robot.data.soft_joint_pos_limits
-        self.dof_vel_limits = self.robot.data.joint_vel_limits
-        self.torque_limits = self.robot.data.joint_effort_limits
+        pos_limits = self.robot.data.soft_joint_pos_limits
+        vel_limits = self.robot.data.joint_vel_limits
+        effort_limits = self.robot.data.joint_effort_limits
+        self.dof_pos_limits = pos_limits[:, self._lab_to_train_perm, :] if pos_limits.dim() == 3 else pos_limits[self._lab_to_train_perm]
+        self.dof_vel_limits = vel_limits[:, self._lab_to_train_perm] if vel_limits.dim() == 2 else vel_limits[self._lab_to_train_perm]
+        self.torque_limits = effort_limits[:, self._lab_to_train_perm] if effort_limits.dim() == 2 else effort_limits[self._lab_to_train_perm]
 
         self.num_actions = self.cfg.env.num_actions
 
@@ -542,6 +717,7 @@ class LeggedRobotEnv(DirectRLEnv):
         self.last_last_actions = torch.zeros_like(self.actions)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
+        self.rew_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # Commands
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device)
@@ -684,8 +860,8 @@ class LeggedRobotEnv(DirectRLEnv):
         return self.reset_terminated.float() * (~self.reset_time_outs).float()
 
     def _reward_dof_pos_limits(self):
-        out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.)
-        out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.)
+        out_of_limits = -(self.dof_pos - self.dof_pos_limits[..., 0]).clip(max=0.)
+        out_of_limits += (self.dof_pos - self.dof_pos_limits[..., 1]).clip(min=0.)
         return torch.sum(out_of_limits, dim=1)
 
     def _reward_dof_vel_limits(self):
@@ -768,6 +944,9 @@ class LeggedRobotEnv(DirectRLEnv):
     # ---- Callbacks ----
 
     def _post_step_update(self):
+        self.dof_pos[:] = self.robot.data.joint_pos[:, self._lab_to_train_perm]
+        self.dof_vel[:] = self.robot.data.joint_vel[:, self._lab_to_train_perm]
+
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt) == 0).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
         if self.cfg.commands.heading_command:
@@ -1010,8 +1189,9 @@ class LeggedRobotEnv(DirectRLEnv):
     def _create_trimesh(self):
         """Add triangle mesh terrain to the simulation using IsaacLab's TerrainImporter."""
         import trimesh
-        from isaaclab.terrains import TerrainImporter, TerrainImporterCfg
-        from isaaclab.sim.spawners.from_files import GroundPlaneCfg
+        from isaaclab.terrains.utils import create_prim_from_mesh
+        import isaaclab.sim as sim_utils
+        from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 
         # Get pre-computed vertices and triangles from the DeepMimicTerrain object
         vertices = self.terrain.vertices
@@ -1020,15 +1200,14 @@ class LeggedRobotEnv(DirectRLEnv):
         # Create a trimesh.Trimesh object
         terrain_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
 
-        # Import the terrain mesh into the simulator
-        terrain_cfg = TerrainImporterCfg(
-            prim_path="/World/ground",
-            terrain_type="generator",
-            terrain_generator=None,
-            visual_material=GroundPlaneCfg().visual_material,
+        # Import the terrain mesh directly as a prim (bypassing TerrainImporter, which
+        # in current IsaacLab requires a terrain_generator when terrain_type=="generator").
+        create_prim_from_mesh(
+            "/World/ground/deepmimic_terrain",
+            terrain_mesh,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 0.0)),
+            physics_material=RigidBodyMaterialCfg(),
         )
-        terrain_importer = TerrainImporter(terrain_cfg)
-        terrain_importer.import_mesh("deepmimic_terrain", terrain_mesh)
 
         # Configure env origins from terrain offsets
         self.env_origins = torch.zeros(self.num_envs, 3, device=self.device)

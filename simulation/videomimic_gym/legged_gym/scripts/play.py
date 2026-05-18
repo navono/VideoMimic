@@ -39,6 +39,20 @@ class PlayManager:
         args.use_wandb = False
         self.train_cfg.runner.resume = True
 
+        # ---- Joint-order debug ----
+        try:
+            lab_names = list(self.env.dof_names)
+        except Exception:
+            lab_names = []
+        cfg_keys = list(self.env_cfg.init_state.default_joint_angles.keys())
+        print("[joint-order] IsaacLab articulation order ({}):".format(len(lab_names)))
+        for i, n in enumerate(lab_names):
+            print(f"  lab[{i:2d}] = {n}")
+        print("[joint-order] cfg.init_state.default_joint_angles keys ({}):".format(len(cfg_keys)))
+        for i, n in enumerate(cfg_keys):
+            print(f"  cfg[{i:2d}] = {n}")
+        # ---- end debug ----
+
         # Initialize PPO runner and policy
         self.ppo_runner, self.train_cfg = task_registry.make_alg_runner(
             env=self.env, name=args.task, args=args, train_cfg=self.train_cfg, train_overrides=self.train_overrides
@@ -126,6 +140,23 @@ class PlayManager:
         obs = self.env.get_observations()
         actions = self.policy({k: v.detach() for k, v in obs.items()}, monitor_activations=False)
         obs, rews, dones, infos = self.env.step(actions.detach())
+
+        self.t += 1
+        if self.t % 50 == 0:
+            crv = getattr(self.env, 'current_reward_value', {}) or {}
+            def _g(k):
+                v = crv.get(k)
+                return float(v[0]) if v is not None else float('nan')
+            print(
+                f"[diag] step={self.t:>5d} "
+                f"rew={float(rews[0]):+.3f} "
+                f"joint_track={_g('joint_pos_tracking'):+.3f} "
+                f"link_track={_g('link_pos_tracking'):+.3f} "
+                f"torso_ori={_g('torso_orientation_tracking'):+.3f} "
+                f"action_abs_max={float(actions.abs().max()):.3f} "
+                f"done={int(dones[0])}",
+                flush=True,
+            )
 
     def run(self):
         """Main simulation loop."""

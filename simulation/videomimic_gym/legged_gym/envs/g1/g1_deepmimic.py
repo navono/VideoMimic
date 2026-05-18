@@ -426,7 +426,11 @@ class G1DeepMimic(RobotDeepMimicEnv, G1RobotEnv):
             )
 
         # Log success rates periodically
-        current_step = self._sim_step_counter.item() if hasattr(self, '_sim_step_counter') else self.episode_length_buf.sum().item()
+        _ssc = getattr(self, '_sim_step_counter', None)
+        if _ssc is None:
+            current_step = self.episode_length_buf.sum().item()
+        else:
+            current_step = _ssc.item() if hasattr(_ssc, 'item') else int(_ssc)
         if current_step >= self.last_log_step + self.log_success_rate_interval:
             current_unique_success_rates = self._compute_and_log_success_rates()
             self._compute_and_log_clip_distribution()

@@ -456,7 +456,10 @@ class LeggedRobotViser:
             """Reset both simulators when reset button is clicked"""
             if hasattr(self, 'robot'):
                 # Reset IsaacGym environment
-                self.robot.reset_idx(torch.tensor([0], device=self.robot.device))
+                # IsaacLab DirectRLEnv exposes ``_reset_idx``; the legacy IsaacGym
+                # name was ``reset_idx``. Prefer the public name when available.
+                reset_fn = getattr(self.robot, 'reset_idx', None) or self.robot._reset_idx
+                reset_fn(torch.tensor([0], device=self.robot.device))
                 print(f'[PLAY] Resetting Isaac')
                 
         # Add ray visualization controls
@@ -642,7 +645,10 @@ class LeggedRobotViser:
                     camera_pos, lookat_pos = self.get_camera_position_for_robot(env_offset, root_pos)
                     client.camera.position = camera_pos
                     client.camera.look_at = lookat_pos
-                    self.robot.set_viewer_camera(camera_pos, lookat_pos)
+                    # Sync the simulator viewport camera if the env exposes one
+                    # (legacy IsaacGym API; absent under IsaacLab/DirectRLEnv).
+                    if hasattr(self.robot, 'set_viewer_camera'):
+                        self.robot.set_viewer_camera(camera_pos, lookat_pos)
 
             # Initialize with the first clip
             if clip_names:

@@ -301,6 +301,8 @@ class LeggedRobotSimCfg:
     dt =  0.005
     substeps = 1
     gravity = [0., 0. ,-9.81]  # [m/s^2]
+    # IsaacLab DirectRLEnv.step() reads sim.render_interval; mirror the default (=1).
+    render_interval: int = 1
     # gravity = [0., 0. ,-7.5]  # [m/s^2]
     # gravity = [0., 0. ,-4.905]  # [m/s^2]
     up_axis = 1  # 0 is y, 1 is z

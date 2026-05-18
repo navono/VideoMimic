@@ -129,12 +129,15 @@ def get_wandb_path(root: str, load_run: str, multi_gpu: bool = False, multi_gpu_
     Returns:
         Path to the downloaded checkpoint file
     """
+    # Defer wandb.Api() initialisation until we actually need to query wandb,
+    # so that local-only runs don't require a wandb login.
+    if not (load_run.startswith('wandb_id_') or load_run.startswith('wandb_')):
+        return None
+
     api = wandb.Api()
     run_id = None
-    
+
     # Handle run ID
-    # if all(c.isalnum() or c == '-' for c in load_run):
-        # run_id = load_run
     if load_run.startswith('wandb_id_'):
         run_id = load_run[9:]
     # Handle run name

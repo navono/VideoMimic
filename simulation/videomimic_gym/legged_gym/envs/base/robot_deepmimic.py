@@ -69,11 +69,13 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
         else:
             self.tracked_body_names = self.body_names
 
-        self.tracked_body_indices = [self.body_names.index(name) for name in self.tracked_body_names]
+        self.tracked_body_sim_names = self._resolve_body_names(self.tracked_body_names)
+        self.tracked_body_indices = [self.body_names.index(name) for name in self.tracked_body_sim_names]
 
         if hasattr(cfg, 'deepmimic') and hasattr(cfg.deepmimic, 'extra_link_names'):
             self.extra_link_names = cfg.deepmimic.extra_link_names
-            self.torso_index = self.body_names.index(self.extra_link_names[0])
+            self.extra_link_sim_names = self._resolve_body_names(self.extra_link_names)
+            self.torso_index = self.body_names.index(self.extra_link_sim_names[0])
             self.extra_link_torso_index = self.extra_link_names.index('torso_link')
         else:
             self.extra_link_names = None
@@ -179,7 +181,7 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
         # current positions for link targets
         points = self.env_frame_to_world_frame(state.link_pos[env_id, 0, :], env_ids)
 
-        i_rb = [self.body_names.index(self.tracked_body_names[k]) for k in range(len(self.tracked_body_names))]
+        i_rb = self.tracked_body_indices
         # current positions of replay link targets
         points_2 = self.rigid_body_pos[env_id, i_rb]
 
@@ -214,7 +216,8 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
             # Set joint states
             dof_pos = state.dofs[env_ids, 0, :]
             dof_vel = torch.zeros_like(dof_pos)
-            self.robot.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
+            joint_ids = None if self._joint_order_is_identity else self._lab_to_train_perm.tolist()
+            self.robot.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids, joint_ids=joint_ids)
 
     def set_visualization_episode(self, episode_idx: int, start_offset: int = 0):
         print(f'Setting episode {episode_idx} with start offset {start_offset}')
@@ -237,12 +240,12 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
                 if not already_reset_replay_data:
                     reset_episode_length = self.replay_data_loader.reset(env_mask)
                     if self.cfg.deepmimic.truncate_rollout_length > 0:
-                        self.max_episode_length = torch.min(
+                        self.ep_max_episode_length = torch.min(
                             self.cfg.deepmimic.truncate_rollout_length * torch.ones_like(reset_episode_length),
                             reset_episode_length
                         )
                     else:
-                        self.max_episode_length = reset_episode_length
+                        self.ep_max_episode_length = reset_episode_length
 
             # For env 0, explicitly set it back to the selected episode
             self.replay_data_loader.set_env_data(0, self.selected_episode_idx, self.selected_start_offset)
@@ -253,12 +256,12 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
             if not already_reset_replay_data:
                 if self.cfg.deepmimic.truncate_rollout_length > 0:
                     reset_episode_length = self.replay_data_loader.reset(env_mask)
-                    self.max_episode_length = torch.min(
+                    self.ep_max_episode_length = torch.min(
                         self.cfg.deepmimic.truncate_rollout_length * torch.ones_like(reset_episode_length),
                         reset_episode_length
                     )
                 else:
-                    self.max_episode_length = self.replay_data_loader.reset(env_mask)
+                    self.ep_max_episode_length = self.replay_data_loader.reset(env_mask)
 
         self.reset_start_state = self.replay_data_loader.get_current_data()
 
@@ -306,8 +309,12 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
         self.dof_pos[env_ids] = self.dof_pos[env_ids] + self.cfg.noise.init_noise_scales.dof_pos * (torch.randn_like(self.dof_pos[env_ids]))
         self.dof_vel[env_ids] = self.dof_vel[env_ids] + self.cfg.noise.init_noise_scales.dof_vel * (torch.randn_like(self.dof_pos[env_ids]))
 
-        # Write to simulation via IsaacLab API
-        self.robot.write_joint_state_to_sim(self.dof_pos[env_ids], self.dof_vel[env_ids], env_ids=env_ids)
+        # Write to simulation via IsaacLab API. ``self.dof_pos`` is held in
+        # training (URDF) order; map to IsaacLab joint indices via the perm.
+        joint_ids = None if self._joint_order_is_identity else self._lab_to_train_perm.tolist()
+        self.robot.write_joint_state_to_sim(
+            self.dof_pos[env_ids], self.dof_vel[env_ids], env_ids=env_ids, joint_ids=joint_ids,
+        )
 
     def _reset_root_states(self, env_ids):
         root_pos = self.env_frame_to_world_frame(self.reset_start_state.root_pos[env_ids], env_ids)
@@ -429,7 +436,7 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
                 dim=1
             )
 
-        time_out = self.episode_length_buf >= self.max_episode_length
+        time_out = self.episode_length_buf >= self.ep_max_episode_length
 
         return died, time_out
 
@@ -459,6 +466,14 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
     def _reward_joint_pos_tracking(self):
         motor_pos_error = self.dof_pos - self.target_motors
         k = self.cfg.rewards.joint_pos_tracking_k
+        if not getattr(self, '_dbg_joint_track_printed', False):
+            self._dbg_joint_track_printed = True
+            with torch.no_grad():
+                print("[dbg-joint-track] dof_names (train order):", list(self.dof_names))
+                print("[dbg-joint-track] dof_pos[0]      :", self.dof_pos[0].cpu().tolist())
+                print("[dbg-joint-track] target_motors[0]:", self.target_motors[0].cpu().tolist())
+                print("[dbg-joint-track] per-joint error :", (self.dof_pos[0] - self.target_motors[0]).cpu().tolist())
+                print("[dbg-joint-track] sum-sq error    :", float((motor_pos_error[0] ** 2).sum()))
         return torch.exp(-torch.pow(motor_pos_error, 2).sum(dim=-1) * k)
 
     def _reward_joint_vel_tracking(self):
@@ -619,7 +634,7 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
     def _obs_phase(self):
         phase = self.replay_data_loader.get_episode_phase()
         if hasattr(self, 'phase_offset'):
-            phase = phase + self.phase_offset / self.max_episode_length
+            phase = phase + self.phase_offset / self.ep_max_episode_length
         sin_phase = torch.sin(2 * torch.pi * phase).unsqueeze(1)
         cos_phase = torch.cos(2 * torch.pi * phase).unsqueeze(1)
         return torch.cat((sin_phase, cos_phase), dim=-1)
