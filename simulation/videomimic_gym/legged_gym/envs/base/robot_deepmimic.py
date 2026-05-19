@@ -165,9 +165,17 @@ class RobotDeepMimicEnv(LeggedRobotEnv, ABC):
     def viz_replay_data(self, points=None, set_robot_pos=False):
         state = self.replay_data_loader.get_next_data()
 
-        reset = self.episode_length_buf > self.ep_lengths
-        self.ep_lengths = self.replay_data_loader.reset(reset)
-        self.episode_length_buf[reset] = 0
+        # Only force a clip reset when we are going to teleport the robot to
+        # the new replay frame (kinematic mode). In physics mode the standard
+        # env termination + ``_reset_idx`` path is responsible for advancing
+        # the replay clip together with the robot pose; running this hidden
+        # reset there would jump the replay reference without resetting the
+        # robot, feeding the policy mismatched targets and causing the robot
+        # to flail and fall.
+        if set_robot_pos:
+            reset = self.episode_length_buf > self.ep_lengths
+            self.ep_lengths = self.replay_data_loader.reset(reset)
+            self.episode_length_buf[reset] = 0
 
         if not self.camera_set:
             base_pos = state.root_pos[0, 0, :]

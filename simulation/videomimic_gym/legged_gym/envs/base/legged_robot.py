@@ -1261,40 +1261,32 @@ class LeggedRobotEnv(DirectRLEnv):
 
     @staticmethod
     def _quat_rotate_inverse(q, v):
-        """Rotate vector v by inverse of quaternion q. q is in wxyz convention."""
-        qw, qx, qy, qz = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-        vx, vy, vz = v[:, 0], v[:, 1], v[:, 2]
+        """Rotate vector v by the inverse of quaternion q (wxyz convention).
 
-        # q * v * q_conj (inverse rotation)
-        t0 = -qx * vx - qy * vy - qz * vz
-        t1 = qw * vx + qy * vz - qz * vy
-        t2 = qw * vy - qx * vz + qz * vx
-        t3 = qw * vz + qx * vy - qy * vx
-
-        result = torch.stack([
-            -t0 * qx + t1 * qw - t2 * qz + t3 * qy,
-            -t0 * qy + t2 * qw + t1 * qz - t3 * qx,
-            -t0 * qz + t3 * qw - t1 * qy + t2 * qx,
-        ], dim=-1)
-        return result
+        Equivalent to R(q)^T @ v, i.e. expressing a world-frame vector in body frame
+        when q is the body-to-world orientation (IsaacLab `root_state_w[:, 3:7]` convention).
+        Uses Rodrigues' formula with sign flip on the cross-product term for the inverse.
+        """
+        q_w = q[:, 0:1]
+        q_vec = q[:, 1:4]
+        # v - 2*qw*(q_vec x v) + 2*q_vec x (q_vec x v)
+        a = v
+        b = -2.0 * q_w * torch.cross(q_vec, v, dim=-1)
+        c = 2.0 * torch.cross(q_vec, torch.cross(q_vec, v, dim=-1), dim=-1)
+        return a + b + c
 
     @staticmethod
     def _quat_apply(q, v):
-        """Rotate vector v by quaternion q. q is in wxyz convention."""
-        qw, qx, qy, qz = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-        vx, vy, vz = v[:, 0], v[:, 1], v[:, 2]
+        """Rotate vector v by quaternion q (wxyz convention).
 
-        t0 = -qx * vx - qy * vy - qz * vz
-        t1 = qw * vx + qy * vz - qz * vy
-        t2 = qw * vy - qx * vz + qz * vx
-        t3 = qw * vz + qx * vy - qy * vx
-
-        result = torch.stack([
-            t0 * qx + t1 * qw + t2 * qz - t3 * qy,
-            t0 * qy + t2 * qw - t1 * qz + t3 * qx,
-            t0 * qz + t3 * qw + t1 * qy - t2 * qx,
-        ], dim=-1)
-        return result
+        Equivalent to R(q) @ v.
+        """
+        q_w = q[:, 0:1]
+        q_vec = q[:, 1:4]
+        a = v
+        b = 2.0 * q_w * torch.cross(q_vec, v, dim=-1)
+        c = 2.0 * torch.cross(q_vec, torch.cross(q_vec, v, dim=-1), dim=-1)
+        return a + b + c
 
     def get_sensor(self, sensor_name):
         return self.sensors.get(sensor_name, None)
