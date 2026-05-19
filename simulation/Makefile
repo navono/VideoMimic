@@ -3,6 +3,11 @@
 #   make play-terrain              # Inference: terrain policy (4 motions)
 #   make play-flat                 # Inference: flat policy (MoCap)
 #   make play-mcpt                 # Inference: MCPT policy (reference joints)
+#   make play-jit-terrain          # Inference: sim2real JIT terrain/heightmap policy
+#   make play-jit-flat             # Inference: sim2real JIT flat/distilled policy
+#   make play-terrain-physics      # Inference: terrain policy with kinematic replay disabled
+#   make play-jit-terrain-physics  # Inference: JIT terrain policy with kinematic replay disabled
+#   make play-terrain-zero         # Diagnostic: terrain env with zero actions
 #   make train-s1                  # Training: Stage 1 MoCap pre-training
 #   make train-s2                  # Training: Stage 2 terrain RL
 #   make train-s3 LOAD_RUN=xxx     # Training: Stage 3 distillation
@@ -13,6 +18,7 @@ SHELL := /bin/bash
 # --- Configurable variables ---
 NGPU       ?= 1
 NUM_ENVS   ?= 2048
+JIT_DIR    ?= ../../simulation_data/checkpoints_jit
 
 # --- Conda helpers ---
 CONDA_ACTIVATE = eval "$$(conda shell.bash hook)" && conda activate rlgpu
@@ -21,7 +27,7 @@ CONDA_ACTIVATE = eval "$$(conda shell.bash hook)" && conda activate rlgpu
 # Inference / Play
 # ============================================================
 
-.PHONY: play-terrain play-flat play-mcpt
+.PHONY: play-terrain play-flat play-mcpt play-jit-terrain play-jit-flat play-terrain-physics play-jit-terrain-physics play-terrain-zero
 
 ## Play terrain policy (4 motions with viser visualization)
 play-terrain:
@@ -80,6 +86,104 @@ play-mcpt:
 	    --env.deepmimic.human_motion_source=resources/data_config/1_motion.yaml \
 	    --train.runner.load_model_strict=True \
 	    --env.viser.enable=True
+
+## Play sim2real JIT terrain/heightmap policy directly
+play-jit-terrain:
+	@$(CONDA_ACTIVATE) && \
+	cd videomimic_gym && \
+	python legged_gym/scripts/play.py \
+	    --task=g1_deepmimic_root_heightfield_no_history_dagger \
+	    --jit_policy_path $(JIT_DIR)/20250502_124756_g1_deepmimic_dict.pt \
+	    --env.deepmimic.use_amass=False \
+	    --num_envs 1 \
+	    --env.deepmimic.use_human_videos=True \
+	    --headless \
+	    --env.deepmimic.respawn_z_offset=0.1 \
+	    --env.deepmimic.link_pos_error_threshold=10.0 \
+	    --train.algorithm.bc_loss_coef=0.0 \
+	    --env.terrain.cast_mesh_to_heightfield=False \
+	    --env.deepmimic.n_append=0 \
+	    --env.deepmimic.human_motion_source=resources/data_config/4_motion.yaml \
+	    --env.viser.enable=True
+
+## Play sim2real JIT flat/distilled policy directly
+play-jit-flat:
+	@$(CONDA_ACTIVATE) && \
+	cd videomimic_gym && \
+	python legged_gym/scripts/play.py \
+	    --task=g1_deepmimic_dagger \
+	    --jit_policy_path $(JIT_DIR)/20250414_170842_g1_deepmimic_dict.pt \
+	    --env.deepmimic.use_amass=True \
+	    --env.deepmimic.amass_terrain_difficulty=1 \
+	    --env.deepmimic.amass_replay_data_path="lafan_single_walk/*.pkl" \
+	    --num_envs 1 \
+	    --env.deepmimic.use_human_videos=False \
+	    --headless \
+	    --env.deepmimic.respawn_z_offset=0.1 \
+	    --env.deepmimic.link_pos_error_threshold=10.0 \
+	    --train.algorithm.bc_loss_coef=0.0 \
+	    --env.viser.enable=True
+
+## Play terrain policy with kinematic replay disabled for policy/physics validation
+play-terrain-physics:
+	@$(CONDA_ACTIVATE) && \
+	cd videomimic_gym && \
+	python legged_gym/scripts/play.py \
+	    --task=g1_deepmimic_root_heightfield_no_history_dagger \
+	    --env.deepmimic.use_amass=False \
+	    --load_run 20250502_124756_g1_deepmimic \
+	    --num_envs 1 \
+	    --env.deepmimic.use_human_videos=True \
+	    --headless \
+	    --env.deepmimic.respawn_z_offset=0.1 \
+	    --env.deepmimic.link_pos_error_threshold=10.0 \
+	    --train.algorithm.bc_loss_coef=0.0 \
+	    --env.terrain.cast_mesh_to_heightfield=False \
+	    --env.deepmimic.n_append=0 \
+	    --env.deepmimic.human_motion_source=resources/data_config/4_motion.yaml \
+	    --train.runner.load_model_strict=True \
+	    --env.viser.enable=True \
+	    --env.deepmimic.viz_replay_sync_robot=False
+
+## Play sim2real JIT terrain policy with kinematic replay disabled
+play-jit-terrain-physics:
+	@$(CONDA_ACTIVATE) && \
+	cd videomimic_gym && \
+	python legged_gym/scripts/play.py \
+	    --task=g1_deepmimic_root_heightfield_no_history_dagger \
+	    --jit_policy_path $(JIT_DIR)/20250502_124756_g1_deepmimic_dict.pt \
+	    --env.deepmimic.use_amass=False \
+	    --num_envs 1 \
+	    --env.deepmimic.use_human_videos=True \
+	    --headless \
+	    --env.deepmimic.respawn_z_offset=0.1 \
+	    --env.deepmimic.link_pos_error_threshold=10.0 \
+	    --train.algorithm.bc_loss_coef=0.0 \
+	    --env.terrain.cast_mesh_to_heightfield=False \
+	    --env.deepmimic.n_append=0 \
+	    --env.deepmimic.human_motion_source=resources/data_config/4_motion.yaml \
+	    --env.viser.enable=True \
+	    --env.deepmimic.viz_replay_sync_robot=False
+
+## Diagnostic: terrain env with kinematic replay disabled and zero actions
+play-terrain-zero:
+	@$(CONDA_ACTIVATE) && \
+	cd videomimic_gym && \
+	python legged_gym/scripts/play.py \
+	    --task=g1_deepmimic_root_heightfield_no_history_dagger \
+	    --zero_policy \
+	    --env.deepmimic.use_amass=False \
+	    --num_envs 1 \
+	    --env.deepmimic.use_human_videos=True \
+	    --headless \
+	    --env.deepmimic.respawn_z_offset=0.1 \
+	    --env.deepmimic.link_pos_error_threshold=10.0 \
+	    --train.algorithm.bc_loss_coef=0.0 \
+	    --env.terrain.cast_mesh_to_heightfield=False \
+	    --env.deepmimic.n_append=0 \
+	    --env.deepmimic.human_motion_source=resources/data_config/4_motion.yaml \
+	    --env.viser.enable=True \
+	    --env.deepmimic.viz_replay_sync_robot=False
 
 # ============================================================
 # Training
@@ -207,6 +311,11 @@ help:
 	@echo "  make play-terrain         Play terrain policy (4 motions)"
 	@echo "  make play-flat            Play flat/distilled policy"
 	@echo "  make play-mcpt            Play MCPT policy (single motion)"
+	@echo "  make play-jit-terrain     Play sim2real JIT terrain/heightmap policy"
+	@echo "  make play-jit-flat        Play sim2real JIT flat/distilled policy"
+	@echo "  make play-terrain-physics Play terrain policy with kinematic replay disabled"
+	@echo "  make play-jit-terrain-physics Play JIT terrain policy with kinematic replay disabled"
+	@echo "  make play-terrain-zero    Diagnostic terrain env with zero actions"
 	@echo ""
 	@echo "Training (single GPU by default):"
 	@echo "  make train-s1             Stage 1: MoCap pre-training"

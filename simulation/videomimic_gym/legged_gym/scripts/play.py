@@ -37,7 +37,9 @@ class PlayManager:
 
         # Set some additional config flags
         args.use_wandb = False
-        self.train_cfg.runner.resume = True
+        self.jit_policy_path = getattr(args, "jit_policy_path", None)
+        self.zero_policy = bool(getattr(args, "zero_policy", False))
+        self.train_cfg.runner.resume = self.jit_policy_path is None and not self.zero_policy
 
         # ---- Joint-order debug ----
         try:
@@ -53,17 +55,29 @@ class PlayManager:
             print(f"  cfg[{i:2d}] = {n}")
         # ---- end debug ----
 
-        # Initialize PPO runner and policy
-        self.ppo_runner, self.train_cfg = task_registry.make_alg_runner(
-            env=self.env, name=args.task, args=args, train_cfg=self.train_cfg, train_overrides=self.train_overrides
-        )
-        self.policy = self.ppo_runner.get_inference_policy(device=self.env.device)
+        # Initialize policy. Normal play mode loads a training checkpoint; JIT mode
+        # loads the sim2real TorchScript export directly.
+        if self.zero_policy:
+            self.ppo_runner = None
+            self.policy = None
+            print("Running zero-action policy.")
+        elif self.jit_policy_path is not None:
+            self.ppo_runner = None
+            self.policy = torch.jit.load(self.jit_policy_path, map_location=self.env.device)
+            self.policy.eval()
+            self.policy.to(self.env.device)
+            print(f"Loaded TorchScript policy from: {self.jit_policy_path}")
+        else:
+            self.ppo_runner, self.train_cfg = task_registry.make_alg_runner(
+                env=self.env, name=args.task, args=args, train_cfg=self.train_cfg, train_overrides=self.train_overrides
+            )
+            self.policy = self.ppo_runner.get_inference_policy(device=self.env.device)
 
         # Simulation step counter
         self.t = 0
 
         # Set up callbacks if visualization is enabled
-        if hasattr(self.env, 'viser_viz'):
+        if self.ppo_runner is not None and hasattr(self.env, 'viser_viz'):
             self.log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', self.train_cfg.runner.experiment_name)
             self.env.viser_viz.setup_checkpoint_selection(self.log_root, self.on_checkpoint_selected)
             self.env.viser_viz.export_button.on_click(self.on_export_clicked)
@@ -72,7 +86,8 @@ class PlayManager:
         """Configure environment parameters based on the task."""
         if 'deepmimic' in task:
             self.env_cfg.deepmimic.viz_replay = True
-            self.env_cfg.deepmimic.viz_replay_sync_robot = True
+            if "deepmimic.viz_replay_sync_robot" not in self.env_overrides:
+                self.env_cfg.deepmimic.viz_replay_sync_robot = True
 
             self.env_cfg.terrain.num_rows = 5
             self.env_cfg.terrain.num_cols = 5
@@ -135,7 +150,18 @@ class PlayManager:
     def step_simulation(self):
         """Perform one simulation step."""
         obs = self.env.get_observations()
-        actions = self.policy({k: v.detach() for k, v in obs.items()}, monitor_activations=False)
+        policy_obs = {k: v.detach() for k, v in obs.items()}
+        if self.zero_policy:
+            actions = torch.zeros(
+                self.env.num_envs,
+                self.env.num_actions,
+                dtype=torch.float32,
+                device=self.env.device,
+            )
+        elif self.jit_policy_path is not None:
+            actions = self.policy(policy_obs)
+        else:
+            actions = self.policy(policy_obs, monitor_activations=False)
         obs, rews, dones, infos = self.env.step(actions.detach())
 
         if hasattr(self.env, 'viser_viz'):
