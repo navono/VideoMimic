@@ -2,5 +2,8 @@ __pycache__
 simulation/data/checkpoints
 simulation/data/unitree_lafan
 simulation/data/videomimic_captures
-real2sim/assets/
-real2sim/demo_data/
+real2sim/assets
+real2sim/demo_data
+real2sim/third_party
+real2sim/server/jobs
+real2sim/server/logs
