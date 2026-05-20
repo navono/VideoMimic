@@ -102,6 +102,8 @@ class PlayManager:
                 self.ppo_runner.load(load_path)
 
         self.policy = self.ppo_runner.get_inference_policy(device=self.env.device)
+        # Reset environment so the new policy starts from a clean state
+        self.env.reset()
 
     def on_export_clicked(self, _):
         """Callback for exporting the policy as a jit module when requested from viser."""

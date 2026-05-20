@@ -1,0 +1,5 @@
+- folder_path: "megasam_reconstruction_results_input_images_cam01_frame_1_111_subsample_2"
+  teacher_checkpoint_run_name: "20250410_063030_g1_deepmimic_mcpt"
+  human_video_data_pattern: "retarget_poses_g1.h5"
+  human_video_terrain_pattern: "background_mesh.obj"
+  default_data_fps_override: 30

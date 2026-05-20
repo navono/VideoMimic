@@ -108,7 +108,7 @@ class LeggedRobotDeepMimicCfg:
     human_video_terrain_pattern = 'background_mesh.obj'
 
     # Teacher checkpoint to use for AMASS data
-    amass_teacher_checkpoint_run_name: str = "20250410_063030_g1_deepmimic"
+    amass_teacher_checkpoint_run_name: str = "20250410_063030_g1_deepmimic_mcpt"
     amass_terrain_difficulty = 2
 
     # data_root = 'demo_data/output_postprocessed'

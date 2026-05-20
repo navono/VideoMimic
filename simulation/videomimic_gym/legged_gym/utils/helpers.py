@@ -149,6 +149,8 @@ def get_wandb_path(root: str, load_run: str, multi_gpu: bool = False, multi_gpu_
     Returns:
         Path to the downloaded checkpoint file
     """
+    if os.environ.get("WANDB_MODE", "").lower() == "disabled":
+        return None
     api = wandb.Api()
     run_id = None
     

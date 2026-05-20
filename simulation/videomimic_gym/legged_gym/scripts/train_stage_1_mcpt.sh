@@ -7,7 +7,7 @@ torchrun --nproc-per-node 2 legged_gym/scripts/train.py \
 --env.deepmimic.use_amass=True --multi_gpu --task=g1_deepmimic --headless \
 --env.terrain.n_rows=16 \
 --num_envs=4096 \
---wandb_note "videomimic_stage_1" \
+--run_name g1_deepmimic_mcpt --wandb_note "videomimic_stage_1" \
 --env.deepmimic.truncate_rollout_length=500 \
 --env.noise.add_noise=True \
 --env.deepmimic.link_pos_error_threshold=0.5 \
