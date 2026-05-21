@@ -108,6 +108,7 @@ play-mcpt:
 	bash $(SCRIPTS_DIR)/play_mcpt_policy.sh
 
 # Play with sitting_standing video data
+# Usage: make play-sitting-standing NUM_EPISODES=20
 play-sitting-standing:
 	$(CONDA_EVAL) && conda activate rlgpu_ig && $(LD_LIB) $(WANDB) \
 	python $(SCRIPTS_DIR)/play.py --task=g1_deepmimic_root_heightfield_no_history_dagger \
@@ -117,4 +118,5 @@ play-sitting-standing:
 	--env.deepmimic.respawn_z_offset=0.1 --env.deepmimic.link_pos_error_threshold=10.0 \
 	--train.algorithm.bc_loss_coef=0.0 --env.terrain.cast_mesh_to_heightfield=False \
 	--train.runner.load_model_strict=True --env.viser.enable=True \
-	--run_name g1_deepmimic_sitting_standing
+	--run_name g1_deepmimic_sitting_standing \
+	--max_episodes $(or $(NUM_EPISODES),10)

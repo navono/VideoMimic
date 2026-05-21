@@ -37,7 +37,12 @@ class PlayManager:
         )
         self.policy = self.ppo_runner.get_inference_policy(device=self.env.device)
 
-        # Simulation step counter
+        # Success rate tracking
+        self.total_episodes = 0
+        self.success_count = 0
+        self.max_episodes = getattr(args, 'max_episodes', None)
+        self.episode_rewards = []
+        self.episode_link_errors = []
         self.t = 0
 
         # Set up callbacks if visualization is enabled
@@ -123,6 +128,38 @@ class PlayManager:
 
         # Step the IsaacGym environment
         obs, rews, dones, infos = self.env.step(actions.detach())
+
+        # Accumulate per-step metrics for running episode
+        self.episode_rewards.append(rews[0].item())
+        if hasattr(self.env, 'link_pos_error'):
+            self.episode_link_errors.append(torch.norm(self.env.link_pos_error[0], dim=-1).mean().item())
+
+        # Log success/failure when episode ends
+        if dones[0]:
+            self.total_episodes += 1
+            total_reward = sum(self.episode_rewards)
+            avg_link_error = sum(self.episode_link_errors) / max(len(self.episode_link_errors), 1)
+
+            # Success = average tracking error below threshold
+            # Walking/stairs: ~0.05-0.1m, sitting/standing: ~0.3-0.4m
+            success_threshold = 0.4
+            is_success = avg_link_error < success_threshold
+            if is_success:
+                self.success_count += 1
+            rate = self.success_count / self.total_episodes * 100
+            status = "SUCCESS" if is_success else "FAILED "
+            print(f"[Episode {self.total_episodes}] {status} | "
+                  f"total_reward: {total_reward:.2f} | "
+                  f"avg_link_error: {avg_link_error:.4f}m | "
+                  f"success rate: {self.success_count}/{self.total_episodes} ({rate:.1f}%)")
+
+            self.episode_rewards = []
+            self.episode_link_errors = []
+
+            if self.max_episodes and self.total_episodes >= self.max_episodes:
+                rate = self.success_count / self.total_episodes * 100
+                print(f"\n=== Done. {self.success_count}/{self.total_episodes} success ({rate:.1f}%) ===")
+                return
 
     def run(self):
         """Main simulation loop."""

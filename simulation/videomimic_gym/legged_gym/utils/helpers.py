@@ -358,6 +358,7 @@ def get_args():
         {"name": "--no_use_wandb", "action": "store_true", "default": True, "help": "Disable using wandb for logging."},
         {"name": "--wandb_note", "type": str, "help": "Note to add to wandb run."},
         {"name": "--multi_gpu", "action": "store_true", "default": False, "help": "Whether to enable multi-gpu training", },
+        {"name": "--max_episodes", "type": int, "default": None, "help": "Max episodes to run in play mode. None for infinite."},
 
 
     ]
