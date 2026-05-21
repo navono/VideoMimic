@@ -112,9 +112,20 @@ IsaacLab 的核心架构变化：
 - 搭建最小可运行 demo: 单个 G1 站立
 - 记录 G1 joint names、body names、default joint pose、joint limits、actuator drive mode 与 IsaacGym baseline 的 diff
 
+### 阶段 0.5: 环境基类决策 (Manager-based vs Direct) (1-2 天)
+
+这是开工前的关键决策点, 决定阶段 1 的整体形态:
+
+| 选项 | 优点 | 缺点 | 适配度 |
+|------|------|------|--------|
+| `ManagerBasedRLEnv` | obs/reward/event 模块化, DR 声明式, 长期更易维护 | replay 注入、teacher obs、history obs、DAgger 这些非标准流程要绕 manager | 中 |
+| `DirectRLEnv` | 保留命令式 step/reset, 接近现有 `LeggedRobot.step()` 结构, 迁移成本低; replay/teacher/policy_to_clone 自由度高 | 失去部分 manager 红利, DR 需要手写 | 高 |
+
+**建议**: 当前 `RobotDeepMimic` 大量依赖 replay 状态注入、teacher obs、`policy_to_clone` DAgger, 与官方 `unitree_rl_lab` 走的路线一致, 优先采用 `DirectRLEnv` 完成 MVP, 待行为对齐后再评估是否切换到 Manager 模式。该决策直接影响阶段 1 工作量估计, 不锁定会偏乐观。
+
 ### 阶段 1: 核心环境迁移 (2-3 周)
 
-将 `base_task.py` + `legged_robot.py` 的核心仿真逻辑迁移到 IsaacLab 的 `ManagerBasedRLEnv` 模式。
+将 `base_task.py` + `legged_robot.py` 的核心仿真逻辑迁移到阶段 0.5 选定的 IsaacLab 环境基类 (默认推荐 `DirectRLEnv`, 仅在阶段 0.5 决策为 Manager 模式时改走 `ManagerBasedRLEnv`)。下文示例仍以 dataclass 配置为主, 两种基类均适用。
 
 **1.1 配置声明**
 
@@ -124,15 +135,17 @@ asset_options = gymapi.AssetOptions()
 asset_options.density = cfg.asset.density
 ...
 
-# 新: 声明式
+# 新: 声明式 (优先 UrdfFileCfg, 省去 URDF→USD 离线转换与资产同步问题)
 @configclass
 class G1AssetCfg(AssetBaseCfg):
     prim_path = "{ENV_REGEX_NS}/Robot"
-    spawn = UsdFileCfg(
-        usd_path=urdf_to_usd(cfg.asset.file),  # 或直接使用 UrdfFileCfg, 取决于 IsaacLab 版本和资产格式
+    spawn = UrdfFileCfg(
+        asset_path=cfg.asset.file,
         rigid_props=RigidBodyPropertiesCfg(density=cfg.asset.density, ...),
         articulation_props=ArticulationRootPropertiesCfg(...),
     )
+    # 仅在 UrdfFileCfg 出现解析问题或大规模并行 spawn 性能瓶颈时
+    # 才退化到 UsdFileCfg(urdf_to_usd(...))
 ```
 
 **1.2 环境构建**
@@ -197,29 +210,36 @@ self.scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel, env_ids)
 - `deepmimic`、`torso_xy_rel`、`torso_yaw_rel`、`target_joints` 等关键 obs 输出 shape 完全一致, 数值差异有解释。
 - contact reward/termination 在固定 replay 片段上的触发帧与 IsaacGym baseline 可对齐或有明确阈值调整记录。
 
-### 阶段 3: 传感器迁移 (1-2 周)
+### 阶段 3: 传感器迁移 (1-1.5 周)
 
 当前自定义 raycaster 传感器需要适配:
 
 | 当前传感器 | IsaacLab 替代方案 |
 |-----------|-------------------|
-| `DepthCameraSensor` (自定义 raycaster) | `isaaclab.sensors.CameraCfg` (基于渲染的深度) 或 `RayCasterCfg` |
-| `HeightfieldSensor` (自定义 raycaster) | `RayCasterCfg` 或自定义 `SensorBase` 子类 |
-| `MultiLinkHeightSensor` | `RayCasterCfg` + multi-origin |
+| `DepthCameraSensor` (自定义 raycaster) | `isaaclab.sensors.RayCasterCfg` + 自定义 ray pattern (优先); 仅当需要 RGB 时才用 `CameraCfg` |
+| `HeightfieldSensor` (自定义 raycaster) | `RayCasterCfg` + grid `pattern_func` |
+| `MultiLinkHeightSensor` | `RayCasterCfg` + multi-origin / 多 sensor 实例 |
 
-**关键决策**: IsaacLab 的 Camera 是基于渲染的 (更真实但更慢), 而当前 raycaster 是纯数学计算 (更快但不渲染图像)。如果只需要深度图用于 RL 观测, 建议使用 `RayCasterCfg`; 如果需要 RGB 图像, 使用 `CameraCfg`。
+**关键决策**: `isaaclab.sensors.RayCasterCfg` 底层就是 Warp GPU raycast, 与当前 `@/home/ubuntu22/sourcecode/VideoMimic/simulation/videomimic_gym/legged_gym/utils/raycaster/sensors.py` 实现思路一致, 因此**不是必须从零重写**。可优先复用 `RayCasterCfg` + 自定义 `pattern_func` 复刻 depth/heightfield/multi-link 几何, shape/dtype 完全可控; IsaacLab 的 Camera 是基于渲染的 (更真实但更慢), 仅在需要 RGB 时才考虑。如果该路线成立, 阶段 3 工作量可压到 1 周左右; 仅当 ray pattern 自定义不足时才退化到完全自实现 SensorBase。
 
-传感器迁移必须先定义兼容层:
+传感器迁移必须先定义兼容层 (无论是否复用 `RayCasterCfg`):
 
 - 输出 shape 与 dtype: `DepthCameraSensor` 当前为 `[num_envs, H, W]` float, `HeightfieldSensor` 可为 uint8 或 float, `MultiLinkHeightSensor` 为 `[num_envs, num_links]`。
 - 坐标系: 当前 ray origin 来自 `rigid_body_pos/quat`, 可选 `only_heading`。
-- 噪声与时序: 当前支持 orientation noise、white noise、bad distance、offset noise、max delay、随机 update frequency。
-- mesh 来源: 当前 raycast mesh 直接使用 `terrain.vertices/triangles`, IsaacLab 版本需要确认能否直接对 imported mesh 做 GPU raycast, 或保留 Warp raycast 作为自定义 sensor。
+- 噪声与时序: 当前支持 orientation noise、white noise、bad distance、offset noise、max delay、随机 update frequency。这层无法直接由 `RayCasterCfg` 提供, 需要在 sensor 外包一层 wrapper 复刻。
+- mesh 来源: 当前 raycast mesh 直接使用 `terrain.vertices/triangles`, IsaacLab 的 `RayCasterCfg` 支持对 imported mesh prim 做 raycast, 但需要把 `DeepMimicTerrain` 加载的真实场景 mesh 注册为可被 raycast 的 prim (见阶段 5)。
 
-### 阶段 4: 训练管线适配 (1 周)
+### 阶段 4: 训练管线适配 (1.5-2 周)
+
+注意: `@/home/ubuntu22/sourcecode/VideoMimic/simulation/videomimic_rl/` 大概率是 fork 修改版 rsl_rl (含 DAgger / `policy_to_clone` / BC loss 开关), 不是 IsaacLab 内置 rsl_rl, 不能假设直接对接。
 
 - 将 `videomimic_rl/rsl_rl` 适配到 IsaacLab 的 `rsl_rl`/Gymnasium env 接口
-- IsaacLab 已内置 `OnPolicyRunnerCfg` 集成, 需要适配 4 阶段训练脚本
+- IsaacLab 已内置 `OnPolicyRunnerCfg` 集成, 需要适配 4 阶段训练脚本 (参考 `@/home/ubuntu22/sourcecode/VideoMimic/simulation/docs/arch.md` Stage 1-4)
+- 重点对接 Stage 3 蒸馏链路:
+  - teacher obs / student obs 在 IsaacLab observation pipeline 下的注入方式
+  - `policy_to_clone` checkpoint 加载与 frozen teacher forward
+  - BC loss 系数开关 (Stage 3 开, Stage 4 关) 与 runner 配置项对接
+  - history obs (Stage 2) 与 no-history obs (Stage 3+) 切换路径
 - 验证 checkpoint 兼容性 (模型权重通用, 但 env 依赖的 obs normalization 需要重新计算)
 - 验证 dict observation、teacher observation、history observation 和 privileged observation 在 runner 中的接口兼容性
 
@@ -259,6 +279,8 @@ self.scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel, env_ids)
 5. **Performance gate**: 记录 1/128/1024/4096 env 的 FPS、step time、显存、启动时间, 与 IsaacGym baseline 比较。
 6. **Training gate**: 至少一个 flat walking 和一个 DeepMimic 任务能完成短训 smoke test, reward 曲线没有明显退化。
 7. **Viser gate**: Web viewer 可显示 IsaacLab state, 不依赖 IsaacGym viewer。
+8. **DAgger pipeline gate**: Stage 3 teacher/student obs pipeline 在 IsaacLab 下能跑通至少 100 iterations, BC loss 开关、`policy_to_clone` 加载、history/no-history obs 切换均可用。
+9. **Replay path gate**: replay 数据路径配置层与 IsaacGym 行为完全一致, 包含已知的 `lafan_walk/` vs `lafan_walk_and_dance/` 路径修正 (见 `@/home/ubuntu22/sourcecode/VideoMimic/simulation/docs/arch.md` Stage 4 已知问题)。
 
 ---
 
@@ -267,15 +289,28 @@ self.scene["robot"].write_joint_state_to_sim(joint_pos, joint_vel, env_ids)
 | 阶段 | 工作量 | 风险 |
 |------|--------|------|
 | 0. 环境准备与 API 固化 | 2-4 天 | 低 |
+| 0.5. 环境基类决策 | 1-2 天 | 低 — 但锁定后影响阶段 1 |
 | 1. 核心环境迁移 | 2-3 周 | 中 — API 差异大 |
 | 2. DeepMimic 框架 | 2-4 周 | 中高 — obs/reward/contact/terrain offset 与状态字段强耦合 |
-| 3. 传感器迁移 | 1-2 周 | **高** — raycaster 重写 |
-| 4. 训练管线 | 1 周 | 中 — 需要适配 |
+| 3. 传感器迁移 | 1-1.5 周 | 中高 — `RayCasterCfg` 可复用, 但噪声/延迟 wrapper 与 mesh 注册需自实现 |
+| 4. 训练管线 (含 DAgger/teacher/BC) | 1.5-2 周 | 中高 — fork 版 rsl_rl 与 Stage 3 蒸馏链路 |
 | 5. 地形系统 | 1 周 | 中 — DeepMimicTerrain 自定义 |
 | 5.5. Viser Web 可视化 | 3-5 天 | 中低 — 需要 state adapter |
 | 6. 验证对齐 | 1-2 周 | 中 — 行为差异排查 |
-| **MVP 总计** | **8-12 周** | 单 G1 + 基础训练 + 部分传感器 |
-| **完整替换总计** | **12-20 周** | 四阶段训练、DeepMimic、terrain、传感器、性能和 sim-to-real 全部对齐 |
+| **MVP 总计** | **10-14 周** | 单 G1 + 基础训练 + 部分传感器 |
+| **完整替换总计** | **16-22 周** | 四阶段训练、DeepMimic、terrain、传感器、性能和 sim-to-real 全部对齐 |
+
+---
+
+## 五点五、显式不迁移 / Out of scope
+
+为避免 scope creep, 以下项目在本次迁移中**显式不做**, 后续如有需要再单独立项:
+
+- IsaacGym viewer 的键盘交互 (`subscribe_viewer_keyboard_event`): 改由 Isaac Sim viewport / Viser 承担, 不在 IsaacLab 中复刻同样的键位绑定。
+- `@/home/ubuntu22/sourcecode/VideoMimic/simulation/videomimic_gym/legged_gym/utils/isaacgym_utils.py` 中的纯辅助函数 (如 `parse_device_str`): 由 IsaacLab 自身设备管理替代, 不做 1:1 移植。
+- 已废弃 / 实验性的 stage 1 训练脚本与中间产物: 不强制在 IsaacLab 上重跑 baseline, 仅保留 IsaacGym 侧 reference checkpoint 用于行为对齐。
+- 旧 `omni.isaac.lab.*` 命名空间兼容: 新代码统一走 `isaaclab.*`, 不维护双 import 路径。
+- IsaacGym → IsaacLab 的 checkpoint 自动续训: 参见建议 7, 仅保证策略结构可加载, 不保证 obs normalization / history / teacher 分布连续。
 
 ---
 
