@@ -174,6 +174,8 @@ def two_round_meshify_and_fill_holes(points: np.ndarray, downsample_voxel_size: 
     3. Feed downsampled points and normals to NKSR algorithm.
     4. Meshify the points.
     """
+    points = np.asarray(points, dtype=np.float32)
+
     if meshification_method == "nksr":
         if downsample_voxel_size is not None:
             print(f"Before voxel downsampling shape: {points.shape}")
@@ -198,6 +200,7 @@ def two_round_meshify_and_fill_holes(points: np.ndarray, downsample_voxel_size: 
 
         # cast rays from the sky down to fill holes and combine with original points
         infilled_pointcloud = get_point_cloud_to_fill_holes(trimesh_mesh, resolution=1024)
+        infilled_pointcloud = np.asarray(infilled_pointcloud, dtype=np.float32)
         infilled_normals = estimate_point_normals(infilled_pointcloud)
         combined_points = torch.from_numpy(np.concatenate([points, infilled_pointcloud], axis=0)).float().to(device)
         combined_normals = torch.from_numpy(np.concatenate([normals, infilled_normals], axis=0)).float().to(device)
@@ -239,8 +242,9 @@ def downsample_point_cloud(points, voxel_size=0.1, num_point_threshold=100, simp
     - If it contains fewer than 100 points, discard all points in that voxel.
     - If it contains 100 or more points, randomly sample 20 points from it.
     """
+    points = np.asarray(points, dtype=np.float32)
     if points.shape[0] == 0:
-        return np.empty((0, 3))
+        return np.empty((0, 3), dtype=np.float32)
 
     # Calculate voxel indices for each point
     voxel_indices = np.floor(points / voxel_size).astype(int)
@@ -258,14 +262,14 @@ def downsample_point_cloud(points, voxel_size=0.1, num_point_threshold=100, simp
     filtered_groups = grouped.filter(lambda x: len(x) >= num_point_threshold)
 
     if filtered_groups.empty:
-         return np.empty((0, 3)) # Return empty array if no voxels meet criteria
+         return np.empty((0, 3), dtype=np.float32) # Return empty array if no voxels meet criteria
 
     if simple_sampling:
         # We group again on the filtered data before sampling
         sampled_df = filtered_groups.groupby(['vx', 'vy', 'vz']).sample(n=20, replace=False, random_state=3301) # Set random_state for reproducibility if needed
 
         # Return the sampled points as a NumPy array
-        return sampled_df[['x', 'y', 'z']].to_numpy()
+        return sampled_df[['x', 'y', 'z']].to_numpy(dtype=np.float32)
 
     else:
         # --- New sampling logic starts here ---
@@ -273,7 +277,7 @@ def downsample_point_cloud(points, voxel_size=0.1, num_point_threshold=100, simp
             if len(group) < num_point_threshold: # Should already be filtered, but double-check
                 return None
 
-            points_in_group = group[['x', 'y', 'z']].to_numpy()
+            points_in_group = group[['x', 'y', 'z']].to_numpy(dtype=np.float32)
             centroid = np.mean(points_in_group, axis=0)
             
             # Calculate distances to centroid
@@ -314,11 +318,11 @@ def downsample_point_cloud(points, voxel_size=0.1, num_point_threshold=100, simp
 
         # Concatenate the results if list is not empty
         if not processed_dfs:
-            return np.empty((0, 3))
+            return np.empty((0, 3), dtype=np.float32)
         else:
             final_sampled_df = pd.concat(processed_dfs, ignore_index=True)
             # Return the sampled points as a NumPy array
-            return final_sampled_df[['x', 'y', 'z']].to_numpy()
+            return final_sampled_df[['x', 'y', 'z']].to_numpy(dtype=np.float32)
         # --- New sampling logic ends here ---
 
 
@@ -335,17 +339,34 @@ def estimate_point_normals(points, radius=0.1, max_nn=30, orient_consistently=Tr
     Returns:
         np.ndarray: Estimated normals as a numpy array of shape (n, 3)
     """
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    
-    # Estimate normals and orient them consistently
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(
-            radius=radius, 
-            max_nn=max_nn
-        )
-    )
-    if orient_consistently:
-        pcd.orient_normals_towards_camera_location()
-    
-    return np.asarray(pcd.normals)
+    points = np.asarray(points, dtype=np.float32)
+    if points.size == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    tree = cKDTree(points)
+    normals = np.zeros_like(points, dtype=np.float32)
+
+    for idx, point in enumerate(points):
+        neighbor_indices = tree.query_ball_point(point, radius)
+        if len(neighbor_indices) < 3:
+            k = min(max_nn, len(points))
+            neighbor_indices = np.atleast_1d(tree.query(point, k=k)[1]).tolist()
+
+        neighbors = points[neighbor_indices]
+        centered = neighbors - neighbors.mean(axis=0, keepdims=True)
+        cov = centered.T @ centered
+        _, eigenvectors = np.linalg.eigh(cov)
+        normal = eigenvectors[:, 0]
+
+        norm = np.linalg.norm(normal)
+        if norm < 1e-8:
+            normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        else:
+            normal = (normal / norm).astype(np.float32)
+
+        if orient_consistently and np.dot(normal, point) > 0:
+            normal = -normal
+
+        normals[idx] = normal
+
+    return normals

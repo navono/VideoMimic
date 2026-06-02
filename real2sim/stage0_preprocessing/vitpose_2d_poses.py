@@ -23,6 +23,17 @@ from mmpose.apis import inference_top_down_pose_model, init_pose_model, vis_pose
 os.environ["PYOPENGL_PLATFORM"] = "egl"
 
 
+def _as_scalar_float(value) -> float:
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return 0.0
+    return float(arr[0])
+
+
+def _normalize_bbox(bbox) -> np.ndarray:
+    return np.array([_as_scalar_float(value) for value in bbox], dtype=np.float32)
+
+
 class ViTPoseModel:
     def __init__(
             self, 
@@ -93,6 +104,10 @@ class ViTPoseModel:
         """
         det_results: a list of Dict[str, np.ndarray] 'bbox': xyxyc
         """
+        det_results = [
+            {'bbox': _normalize_bbox(det_result['bbox'])}
+            for det_result in det_results
+        ]
         out, _ = inference_top_down_pose_model(self.model,
                                                image,
                                                person_results=det_results,
@@ -202,7 +217,7 @@ def main(video_dir: str='./demo_data/input_images/arthur_tyler_pass_by_nov20/cam
                 if sum([box['x1'], box['y1'], box['x2'], box['y2']]) == 0:
                     continue
 
-                bbox_dict = {'bbox': np.array([box['x1'], box['y1'], box['x2'], box['y2'], box['score']])}
+                bbox_dict = {'bbox': np.array([box['x1'], box['y1'], box['x2'], box['y2'], 1.0], dtype=np.float32)}
                 bboxes.append(bbox_dict)
                 frame_person_ids.append(box['instance_id'])
 
@@ -243,5 +258,3 @@ def main(video_dir: str='./demo_data/input_images/arthur_tyler_pass_by_nov20/cam
 
 if __name__ == "__main__":
     tyro.cli(main)
-
-

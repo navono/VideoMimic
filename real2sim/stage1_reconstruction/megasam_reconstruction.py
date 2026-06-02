@@ -33,10 +33,11 @@ megasam_package_path = os.path.join(project_root, "third_party/megasam-package")
 sys.path.append(megasam_package_path)
 sys.path.append(os.path.join(megasam_package_path, 'Depth-Anything'))
 sys.path.append(os.path.join(megasam_package_path, 'UniDepth'))
+sys.path.append(os.path.join(megasam_package_path, "base"))
+sys.path.append(os.path.join(megasam_package_path, "base/thirdparty/lietorch"))
 sys.path.append(os.path.join(megasam_package_path, "base/droid_slam"))
 sys.path.append(os.path.join(megasam_package_path, 'cvd_opt/core'))
 sys.path.append(os.path.join(megasam_package_path, 'cvd_opt'))
-sys.path.append(os.path.join(megasam_package_path, "base/droid_slam"))
 
 from raft import RAFT
 from droid import Droid

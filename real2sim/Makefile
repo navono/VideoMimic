@@ -1,7 +1,8 @@
 SHELL := /bin/bash
 
 # --------------- Configurable variables ---------------
-VIDEO_NAME  ?= my_video
+# VIDEO_PATH: path to the video file (e.g. assets/sitting_standing.mp4)
+VIDEO_PATH  ?= ./assets/sitting_standing.mp4
 STRIDE      ?= 2
 ROBOT       ?= g1
 HEIGHT      ?= -1
@@ -9,8 +10,8 @@ VIS         ?= 0
 GENDER      ?= male
 
 # --------------- Derived paths ---------------
-# Strip path and extension from VIDEO_NAME, e.g. assets/sitting_standing.mp4 -> sitting_standing
-VID_STEM        := $(basename $(notdir $(VIDEO_NAME)))
+# Strip path and extension from VIDEO_PATH, e.g. assets/sitting_standing.mp4 -> sitting_standing
+VID_STEM        := $(basename $(notdir $(VIDEO_PATH)))
 BASE_DIR        := demo_data/$(VID_STEM)
 CAM_DIR         := $(BASE_DIR)/input_images/cam01
 MASKS_DIR       := $(BASE_DIR)/input_masks/cam01
@@ -38,6 +39,13 @@ PROXY ?= http://127.0.0.1:18899
 HF_TOKEN ?= xx
 PROXY_ENV := $(if $(PROXY),http_proxy=$(PROXY) https_proxy=$(PROXY),) HF_TOKEN=$(HF_TOKEN)
 
+# --------------- jaxls solve env (Step 2 optimization & Step 4 retargeting) ---------------
+# The jaxls FK-jacobian kernels crash XLA's compiler (both the CPU LLVM backend
+# and the WSL2 CUDA plugin) at full optimization. Force CPU and lower the XLA
+# optimization level so the solves compile cleanly (~90s for 100 timesteps).
+# Only affects JAX; torch GPU work in these stages is unaffected.
+JAXLS_ENV := JAX_PLATFORMS=cpu XLA_FLAGS="--xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true"
+
 # --------------- Targets ---------------
 
 .PHONY: pipeline all _init_dirs preprocess reconstruct optimize postprocess retarget visualize extract-frames
@@ -54,7 +62,7 @@ pipeline: _init_dirs
 	$(if $(PROXY),,export HF_TOKEN=$(HF_TOKEN) &&) \
 	echo "=== Step 0: Preprocessing ===" && \
 	conda activate vm1rs && \
-	bash preprocess_human.sh $(VIDEO_NAME) $(VIS) && \
+	bash preprocess_human.sh $(VIDEO_PATH) $(VIS) && \
 	echo "=== Step 1: Reconstruction ===" && \
 	conda activate vm1recon && \
 	python stage1_reconstruction/megasam_reconstruction.py \
@@ -69,7 +77,7 @@ pipeline: _init_dirs
 	    python stage2_optimization/optimize_smpl_shape_for_height.py \
 	        --height $(HEIGHT) --output-dir $(SMPL_DIR); \
 	fi && \
-	python stage2_optimization/megahunter_optimization.py \
+	$(JAXLS_ENV) python stage2_optimization/megahunter_optimization.py \
 	    --world-env-path "$$MEGASAM_OUT" \
 	    --bbox-dir $(MASKS_DIR)/json_data \
 	    --pose2d-dir $(POSE2D_DIR) \
@@ -87,7 +95,7 @@ pipeline: _init_dirs
 	    --gender $(GENDER) --is-megasam && \
 	echo "=== Step 4: Retargeting ===" && \
 	conda activate vm1rs && \
-	python stage4_retargeting/robot_motion_retargeting.py \
+	$(JAXLS_ENV) python stage4_retargeting/robot_motion_retargeting.py \
 	    --src-dir "$$POSTPROC_DIR" \
 	    --contact-dir $(CONTACT_DIR) && \
 	echo "Pipeline complete! Results in $$POSTPROC_DIR"
@@ -99,7 +107,7 @@ all: _init_dirs preprocess reconstruct optimize postprocess retarget
 # ---------- Step 0: Preprocessing (vm1rs) ----------
 preprocess: _init_dirs
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	$(PROXY_ENV) bash preprocess_human.sh $(VIDEO_NAME) $(VIS)
+	$(PROXY_ENV) bash preprocess_human.sh $(VIDEO_PATH) $(VIS)
 
 # Individual preprocessing steps
 sam2: _init_dirs
@@ -156,7 +164,7 @@ postprocess: _init_dirs
 # ---------- Step 4: Retargeting (vm1rs) ----------
 retarget: _init_dirs
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	$(PROXY_ENV) python stage4_retargeting/robot_motion_retargeting.py \
+	$(PROXY_ENV) $(JAXLS_ENV) python stage4_retargeting/robot_motion_retargeting.py \
 	    --src-dir $(POSTPROC_DIR) \
 	    --contact-dir $(CONTACT_DIR)
 
@@ -189,7 +197,7 @@ define _optimize_body
 	    python stage2_optimization/optimize_smpl_shape_for_height.py \
 	        --height $(HEIGHT) --output-dir $(SMPL_DIR); \
 	fi && \
-	python stage2_optimization/megahunter_optimization.py \
+	$(JAXLS_ENV) python stage2_optimization/megahunter_optimization.py \
 	    --world-env-path $(MEGASAM_OUT) \
 	    --bbox-dir $(MASKS_DIR)/json_data \
 	    --pose2d-dir $(POSE2D_DIR) \

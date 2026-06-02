@@ -45,10 +45,11 @@ from pathlib import Path
 sys.path.append('third_party/megasam-package')
 sys.path.append('third_party/megasam-package/Depth-Anything')
 sys.path.append('third_party/megasam-package/UniDepth')
+sys.path.append("third_party/megasam-package/base")
+sys.path.append("third_party/megasam-package/base/thirdparty/lietorch")
 sys.path.append("third_party/megasam-package/base/droid_slam")
 sys.path.append('third_party/megasam-package/cvd_opt/core')
 sys.path.append('third_party/megasam-package/cvd_opt')
-sys.path.append("third_party/megasam-package/base/droid_slam")
 
 from raft import RAFT
 from droid import Droid
