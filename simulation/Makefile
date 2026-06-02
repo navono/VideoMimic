@@ -12,8 +12,9 @@ CUDA_DEVICES ?= 0,1
 CONDA_EVAL := eval "$$(conda shell.bash hook)"
 
 # Isaac Gym needs libpython shared library on LD_LIBRARY_PATH
-# Remove system CUDA paths to avoid CUDA 12.8/11.8 runtime conflict on RTX 4090
-LD_LIB := export LD_LIBRARY_PATH=$$CONDA_PREFIX/lib &&
+# RTX 4090 fix: set ONLY conda lib, remove system CUDA 12.8 paths
+# Also redirect CUDA_HOME to conda env to avoid linking to system CUDA 12.8
+LD_LIB := export LD_LIBRARY_PATH=$$CONDA_PREFIX/lib && export CUDA_HOME=$$CONDA_PREFIX &&
 
 # RTX 4090 fix: preload PhysX before PyTorch initializes CUDA
 ISAAC_PRELOAD := export ISAACGYM_PRELOAD=1 &&
