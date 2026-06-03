@@ -159,12 +159,14 @@ class PlayManager:
             if self.max_episodes and self.total_episodes >= self.max_episodes:
                 rate = self.success_count / self.total_episodes * 100
                 print(f"\n=== Done. {self.success_count}/{self.total_episodes} success ({rate:.1f}%) ===")
-                return
+                return False
+
+        return True
 
     def run(self):
         """Main simulation loop."""
-        while True:
-            self.step_simulation()
+        while self.step_simulation():
+            pass
 
 
 if __name__ == '__main__':

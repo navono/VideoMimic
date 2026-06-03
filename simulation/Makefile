@@ -32,14 +32,14 @@ SCRIPTS_DIR := videomimic_gym/legged_gym/scripts
 # --------------- Targets ---------------
 
 .PHONY: train-stage1 train-stage2 train-stage3 train-stage4 \
-        play-terrain play-flat play-mcpt play-sitting-standing \
+        play-terrain play-flat play-mcpt play-sitting-standing play-teacher \
         tensorboard-ss-distill
 
 # ---------- Training (4 stages, sequential) ----------
 
 # Stage 1: MoCap Pre-training
 train-stage1:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	bash $(SCRIPTS_DIR)/train_stage_1_mcpt.sh
 
 # Stage 2: Terrain RL
@@ -48,7 +48,7 @@ train-stage1:
 #   Current machine:  make train-stage2 NUM_GPUS=1 NUM_ENVS=2048
 #   Custom data:      make train-stage2 NUM_GPUS=4 MOTION_CFG=resources/data_config/human_motion_list_123_motions.yaml
 train-stage2:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	cd videomimic_gym && \
 	torchrun --nproc-per-node $(NUM_GPUS) legged_gym/scripts/train.py \
 	--task=g1_deepmimic_proj_heightfield --headless \
@@ -69,7 +69,7 @@ train-stage2:
 
 # Stage 3: Distillation (requires LOAD_RUN from stage 2)
 train-stage3:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	cd videomimic_gym && \
 	torchrun --nproc-per-node $(NUM_GPUS) legged_gym/scripts/train.py \
 	--task=g1_deepmimic_root_heightfield_no_history_dagger --headless \
@@ -86,7 +86,7 @@ train-stage3:
 
 # Stage 4: RL Finetuning (requires LOAD_RUN from stage 3)
 train-stage4:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	cd videomimic_gym && \
 	torchrun --nproc-per-node $(NUM_GPUS) legged_gym/scripts/train.py \
 	--task=g1_deepmimic_root_heightfield_no_history_dagger --headless \
@@ -107,29 +107,66 @@ train-stage4:
 # ---------- Inference ----------
 
 play-terrain:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	bash $(SCRIPTS_DIR)/play_terrain_policy.sh
 
 play-flat:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	bash $(SCRIPTS_DIR)/play_flat_policy.sh
 
 play-mcpt:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
 	bash $(SCRIPTS_DIR)/play_mcpt_policy.sh
 
+# make play-sitting-standing LOAD_RUN=20250414_170842_g1_deepmimic NUM_EPISODES=5
+
 # Play with sitting_standing video data
-# Usage: make play-sitting-standing NUM_EPISODES=20
+# Usage: make play-sitting-standing LOAD_RUN=<distill_run_name> NUM_EPISODES=20
+SS_PLAY_RUN ?= 20260603_094747_g1_deepmimic_ss_distill
+# GPU PhysX currently fails silently on this RTX 4090/Isaac Gym runtime; use CPU
+# PhysX for playback unless explicitly overridden.
+SS_PLAY_SIM_DEVICE ?= cpu
+SS_PLAY_PIPELINE ?= cpu
 play-sitting-standing:
-	$(CONDA_EVAL) && conda activate rlgpu_ig && $(ISAAC_PRELOAD) $(LD_LIB) $(WANDB) \
-	python $(SCRIPTS_DIR)/play.py --task=g1_deepmimic_root_heightfield_no_history_dagger \
-	--load_run 20250502_124756_g1_deepmimic_distill --num_envs 1 \
-	--env.deepmimic.use_amass=False --env.deepmimic.use_human_videos=True \
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(CUDA) $(LD_LIB) $(WANDB) \
+	FILTER_PHYSX_LOG=$(CURDIR)/videomimic_gym/logs/play-sitting-standing.console.log \
+	$(FILTER_PHYSX) python $(SCRIPTS_DIR)/play.py --task=g1_deepmimic_root_heightfield_no_history_dagger \
+	--headless \
+	--sim_device=$(SS_PLAY_SIM_DEVICE) --pipeline=$(SS_PLAY_PIPELINE) \
+	--load_run $(or $(LOAD_RUN),$(SS_PLAY_RUN)) --num_envs 1 \
+	--env.deepmimic.use_amass=False \
+	--env.deepmimic.use_human_videos=True \
 	--env.deepmimic.human_motion_source=resources/data_config/sitting_standing_motion.yaml \
-	--env.deepmimic.respawn_z_offset=0.1 --env.deepmimic.link_pos_error_threshold=10.0 \
-	--train.algorithm.bc_loss_coef=0.0 --env.terrain.cast_mesh_to_heightfield=False \
-	--train.runner.load_model_strict=True --env.viser.enable=True \
+	--env.deepmimic.respawn_z_offset=0.1 \
+	--env.deepmimic.link_pos_error_threshold=10.0 \
+	--train.algorithm.bc_loss_coef=0.0 \
+	--env.terrain.cast_mesh_to_heightfield=False \
+	--train.runner.load_model_strict=True \
+	--env.viser.enable=True \
 	--run_name g1_deepmimic_sitting_standing \
+	--max_episodes $(or $(NUM_EPISODES),10)
+
+# Play teacher (Stage 2 terrain) checkpoint with AMASS data
+# Uses g1_deepmimic_dagger task (different network from distill)
+# Usage: make play-teacher NUM_EPISODES=5 SS_PLAY_SIM_DEVICE=cuda:0 SS_PLAY_PIPELINE=cuda
+TEACHER_RUN ?= 20250414_170842_g1_deepmimic
+play-teacher:
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(CUDA) $(LD_LIB) $(WANDB) \
+	FILTER_PHYSX_LOG=$(CURDIR)/videomimic_gym/logs/play-teacher.console.log \
+	$(FILTER_PHYSX) python $(SCRIPTS_DIR)/play.py --task=g1_deepmimic_dagger \
+	--headless \
+	--sim_device=$(SS_PLAY_SIM_DEVICE) \
+	--pipeline=$(SS_PLAY_PIPELINE) \
+	--load_run $(or $(LOAD_RUN),$(TEACHER_RUN)) \
+	--num_envs 1 \
+	--env.deepmimic.use_amass=True \
+	--env.deepmimic.amass_terrain_difficulty=1 \
+	--env.deepmimic.amass_replay_data_path="lafan_walk_and_dance/*.pkl" \
+	--env.deepmimic.use_human_videos=False \
+	--env.deepmimic.respawn_z_offset=0.1 \
+	--env.deepmimic.link_pos_error_threshold=10.0 \
+	--train.algorithm.bc_loss_coef=0.0 \
+	--env.viser.enable=True \
 	--max_episodes $(or $(NUM_EPISODES),10)
 
 # ---------- Monitoring ----------
@@ -173,6 +210,7 @@ SS_LOG_DIR ?= videomimic_gym/logs/g1_deepmimic
 tensorboard-ss-distill:
 	$(CONDA_EVAL) && conda activate rlgpu && \
 	tensorboard --logdir $(SS_LOG_DIR) --bind_all
+
 
 # ---------- Sitting/Standing Training ----------
 # Uses pre-trained Stage 2 checkpoint as teacher for distillation, then fine-tunes.
@@ -226,7 +264,7 @@ train-sitting-standing-finetune:
 	--train.algorithm.schedule=fixed \
 	--env.deepmimic.upsample_data=True \
 	--env.deepmimic.use_human_videos=True \
-	--env.deepmimic.use_amass=True \
+	--env.deepmimic.use_amass=False \
 	--env.deepmimic.amass_replay_data_path=lafan_walk_and_dance/*.pkl \
 	--env.deepmimic.link_pos_error_threshold=0.5 \
 	--train.runner.save_interval=500 \

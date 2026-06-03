@@ -1062,7 +1062,14 @@ class LeggedRobotViser:
         root_pos = root_states[env_idx, :3].cpu().numpy()
         root_quat = root_states[env_idx, 3:7].cpu().numpy()
         dof_pos_np = dof_pos[env_idx].cpu().numpy()
-        
+
+        # Debug: print position every 60 frames (~1 second)
+        if not hasattr(self, '_debug_frame_count'):
+            self._debug_frame_count = 0
+        self._debug_frame_count += 1
+        if self._debug_frame_count % 60 == 1:
+            print(f'[viser debug] root_pos={root_pos}, dof_pos_range=[{dof_pos_np.min():.4f}, {dof_pos_np.max():.4f}]')
+
         # Convert quaternion from (x,y,z,w) to (w,x,y,z) for Viser
         viser_quat = np.array([root_quat[3], root_quat[0], root_quat[1], root_quat[2]])
 

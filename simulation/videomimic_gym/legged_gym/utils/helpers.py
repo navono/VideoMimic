@@ -222,6 +222,21 @@ def get_load_path(root: str, load_run: str = '', checkpoint: int = -1, multi_gpu
     if load_run == '':
         load_run = os.listdir(root)[-1]
     checkpoint_root = os.path.join(root, load_run)
+
+    # Fallback: search data/checkpoints/ if not found in logs/
+    if not os.path.isdir(checkpoint_root):
+        from legged_gym import LEGGED_GYM_ROOT_DIR
+        simulation_root = os.path.abspath(os.path.join(LEGGED_GYM_ROOT_DIR, '..'))
+        alt_roots = [
+            os.path.join(simulation_root, 'data', 'checkpoints'),
+        ]
+        for alt_root in alt_roots:
+            alt_path = os.path.join(alt_root, load_run)
+            if os.path.isdir(alt_path):
+                checkpoint_root = alt_path
+                print(f"Checkpoint not in {root}, using {checkpoint_root}")
+                break
+
     if checkpoint == -1:
         models = [file for file in os.listdir(checkpoint_root) if 'model_' in file]
         models.sort(key=lambda m: '{0:0>15}'.format(m))
