@@ -38,6 +38,33 @@ from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils.jit import try_load_jit_model
 
+
+SIMULATION_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+
+
+def resolve_policy_checkpoint_path(file_path):
+    if os.path.isfile(file_path):
+        return file_path
+
+    if os.path.isdir(file_path):
+        return file_path
+
+    if os.path.sep in file_path:
+        return file_path
+
+    candidates = [
+        os.path.join(SIMULATION_ROOT, 'data', 'checkpoints', file_path),
+        os.path.join(SIMULATION_ROOT, 'videomimic_gym', 'logs', 'g1_deepmimic', file_path),
+        os.path.join('data', 'checkpoints', file_path),
+        os.path.join('logs', 'g1_deepmimic', file_path),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) or os.path.isdir(candidate):
+            return candidate
+
+    print(f'Warning: checkpoint {file_path} not found in data/checkpoints/ or logs/g1_deepmimic/')
+    return file_path
+
 class PPO:
     actor_critic: ActorCritic
 
@@ -345,6 +372,7 @@ class PPO:
         For a regular checkpoint, we accept the log directory, and will automatically load the latest checkpoint (or else a path to a specific checkpoint).
         """
         num_attempts = 5
+        file_path = resolve_policy_checkpoint_path(file_path)
         print(f'Loading policy for BC from {file_path}...')
         for attempt in range(num_attempts):
             try:
@@ -390,8 +418,7 @@ class PPO:
         self.teacher_checkpoints = teacher_checkpoints
         self.bc_policies = []
         for teacher_checkpoint in teacher_checkpoints:
-            cheeckpoint_joined = os.path.join('logs/g1_deepmimic', teacher_checkpoint)
-            self.bc_policies.append(self.load_policy_to_clone(cheeckpoint_joined))
+            self.bc_policies.append(self.load_policy_to_clone(teacher_checkpoint))
     
     def get_teacher_actions(self, obs):
         if self.use_multi_teacher:

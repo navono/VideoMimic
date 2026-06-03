@@ -433,9 +433,9 @@ class ReplayDataLoader:
                         'joints': data['joints'][:],
                         'link_pos': data['link_pos'][:],
                         'link_quat': data['link_quat'][:],
-                        'joint_names': data.attrs['/joint_names'].tolist(),
-                        'link_names': data.attrs['/link_names'].tolist(),
-                        'fps': data.attrs['/fps'] if '/fps' in data.attrs else self.default_data_fps,
+                        'joint_names': data.attrs['joint_names'].tolist(),
+                        'link_names': data.attrs['link_names'].tolist(),
+                        'fps': data.attrs['fps'] if 'fps' in data.attrs else self.default_data_fps,
                     }
 
                     if not 'waist_yaw_joint' in replay_data['joint_names']:
