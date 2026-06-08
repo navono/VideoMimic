@@ -9,6 +9,15 @@ HEIGHT      ?= -1
 VIS         ?= 0
 GENDER      ?= male
 
+# --------------- Convert to AdaMimic variables ---------------
+# TASK_NAME:  name of the motion task (used as AdaMimic dataset folder name)
+# CONVERT_INPUT:  path to retarget_poses_g1.h5 (auto-detected if empty)
+# CONVERT_OUTPUT: output directory for data.pt (auto-derived if empty)
+TASK_NAME       ?= sitting_standing
+ADAMIMIC_DATASET ?= ../../AdaMimic/legged_gym/resources/dataset/g1_dof27_data
+CONVERT_INPUT   ?=
+CONVERT_OUTPUT  ?= $(ADAMIMIC_DATASET)/$(TASK_NAME)/output
+
 # --------------- Derived paths ---------------
 # Strip path and extension from VIDEO_PATH, e.g. assets/sitting_standing.mp4 -> sitting_standing
 VID_STEM        := $(basename $(notdir $(VIDEO_PATH)))
@@ -48,7 +57,7 @@ JAXLS_ENV := JAX_PLATFORMS=cpu XLA_FLAGS="--xla_backend_optimization_level=0 --x
 
 # --------------- Targets ---------------
 
-.PHONY: pipeline all _init_dirs preprocess reconstruct optimize postprocess retarget visualize extract-frames
+.PHONY: pipeline all _init_dirs preprocess reconstruct optimize postprocess retarget visualize extract-frames convert-to-adamimic
 
 # Create directories for the video
 _init_dirs:
@@ -177,6 +186,49 @@ visualize:
 	$(PROXY_ENV) python visualization/complete_results_egoview_visualization.py \
 	    --postprocessed-dir "$$POSTPROC_DIR" \
 	    --robot-name $(ROBOT) --is-megasam
+
+# ---------- Convert to AdaMimic (vm1rs) ----------
+# Converts retarget_poses_g1.h5 to AdaMimic data.pt for stage1 training.
+# Usage:
+#   make convert-to-adamimic                                          # auto-detect input
+#   make convert-to-adamimic TASK_NAME=my_task                        # specify task name
+#   make convert-to-adamimic CONVERT_INPUT=/path/to/retarget.h5       # specify input manually
+#   make convert-to-adamimic CONVERT_SMOOTH=1                         # enable smoothing
+CONVERT_SMOOTH ?=
+# SOURCE_FPS: actual fps of the motion data.
+# For a 15fps video with STRIDE=2, real fps = 15/2 = 7.5
+# Override if your video has a different framerate.
+SOURCE_FPS      ?=
+convert-to-adamimic:
+	@$(CONDA_EVAL) && conda activate vm1rs && \
+	if [ -n "$(CONVERT_INPUT)" ]; then \
+	    H5_PATH="$(CONVERT_INPUT)"; \
+	else \
+	    H5_PATH=$$(for d in $(BASE_DIR)/output_calib_mesh/*/; do [ -f "$$d/retarget_poses_g1.h5" ] && echo "$$d/retarget_poses_g1.h5" && break; done); \
+	fi && \
+	if [ -z "$$H5_PATH" ] || [ ! -f "$$H5_PATH" ]; then \
+	    echo "Error: retarget_poses_g1.h5 not found. Run 'make retarget' first or set CONVERT_INPUT."; \
+	    exit 1; \
+	fi && \
+	echo "Input:  $$H5_PATH" && \
+	echo "Output: $(CONVERT_OUTPUT)/data.pt" && \
+	echo "Task:   $(TASK_NAME)" && \
+	mkdir -p $(CONVERT_OUTPUT) && \
+	SMOOTH_FLAG=$$( [ "$(CONVERT_SMOOTH)" = "1" ] && echo "--smooth" || echo "" ) && \
+	SOURCE_FPS_FLAG=$$( [ -n "$(SOURCE_FPS)" ] && echo "--source_fps $(SOURCE_FPS)" || echo "" ) && \
+	python tools/convert_to_adamimic.py \
+	    --input "$$H5_PATH" \
+	    --output_dir $(CONVERT_OUTPUT) \
+	    --task_name $(TASK_NAME) \
+	    --target_fps 30 \
+	    $$SMOOTH_FLAG \
+	    $$SOURCE_FPS_FLAG && \
+	JOINT_ID_SRC="$(ADAMIMIC_DATASET)/joint_id.txt" && \
+	if [ ! -f "$(CONVERT_OUTPUT)/joint_id.txt" ] && [ -f "$$JOINT_ID_SRC" ]; then \
+	    cp "$$JOINT_ID_SRC" "$(CONVERT_OUTPUT)/joint_id.txt" && \
+	    echo "Copied joint_id.txt to $(CONVERT_OUTPUT)/"; \
+	fi && \
+	echo "Done. Run AdaMimic stage1 with: make -C ../../AdaMimic stage1 TASK=$(TASK_NAME)"
 
 # ---------- Utility: extract frames ----------
 # Auto-detect total frames via ffprobe if END_FRAME not set

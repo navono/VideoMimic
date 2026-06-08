@@ -32,7 +32,7 @@ SCRIPTS_DIR := videomimic_gym/legged_gym/scripts
 # --------------- Targets ---------------
 
 .PHONY: train-stage1 train-stage2 train-stage3 train-stage4 \
-        play-terrain play-flat play-mcpt play-sitting-standing play-teacher \
+        play-terrain play-flat play-mcpt play-sitting-standing play-teacher play-teacher-sitting-standing \
         tensorboard-ss-distill
 
 # ---------- Training (4 stages, sequential) ----------
@@ -150,6 +150,8 @@ play-sitting-standing:
 # Uses g1_deepmimic_dagger task (different network from distill)
 # Usage: make play-teacher NUM_EPISODES=5 SS_PLAY_SIM_DEVICE=cuda:0 SS_PLAY_PIPELINE=cuda
 TEACHER_RUN ?= 20250414_170842_g1_deepmimic
+SS_PLAY_SIM_DEVICE ?= cuda:0
+SS_PLAY_PIPELINE ?= cuda
 play-teacher:
 	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(CUDA) $(LD_LIB) $(WANDB) \
 	FILTER_PHYSX_LOG=$(CURDIR)/videomimic_gym/logs/play-teacher.console.log \
@@ -168,6 +170,29 @@ play-teacher:
 	--train.algorithm.bc_loss_coef=0.0 \
 	--env.viser.enable=True \
 	--max_episodes $(or $(NUM_EPISODES),10)
+
+# Play teacher checkpoint with sitting-standing motion data
+# Usage: make play-teacher-sitting-standing NUM_EPISODES=5
+#        make play-teacher-sitting-standing LOAD_RUN=20250410_063030_g1_deepmimic_mcpt
+play-teacher-sitting-standing:
+	$(CONDA_EVAL) && conda activate rlgpu && $(ISAAC_PRELOAD) $(CUDA) $(LD_LIB) $(WANDB) \
+	FILTER_PHYSX_LOG=$(CURDIR)/videomimic_gym/logs/play-teacher-sitting-standing.console.log \
+	$(FILTER_PHYSX) python $(SCRIPTS_DIR)/play.py --task=g1_deepmimic_dagger \
+	--headless \
+	--sim_device=$(SS_PLAY_SIM_DEVICE) \
+	--pipeline=$(SS_PLAY_PIPELINE) \
+	--load_run $(or $(LOAD_RUN),$(TEACHER_RUN)) \
+	--num_envs 1 \
+	--env.deepmimic.use_amass=False \
+	--env.deepmimic.use_human_videos=True \
+	--env.deepmimic.human_motion_source=resources/data_config/sitting_standing_motion.yaml \
+	--env.deepmimic.respawn_z_offset=0.5 \
+	--env.deepmimic.init_velocities=False \
+	--env.deepmimic.link_pos_error_threshold=10.0 \
+	--train.algorithm.bc_loss_coef=0.0 \
+	--env.terrain.cast_mesh_to_heightfield=False \
+	--env.viser.enable=True \
+	--max_episodes $(or $(NUM_EPISODES),5)
 
 # ---------- Monitoring ----------
 

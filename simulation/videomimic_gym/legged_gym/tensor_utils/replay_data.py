@@ -427,15 +427,23 @@ class ReplayDataLoader:
                     # Load H5 data
                     data = h5py.File(pkl_path, 'r')
 
+                    # h5py attribute names may have a '/' prefix in some file formats
+                    def _get_attr(d, name):
+                        if name in d.attrs:
+                            return d.attrs[name]
+                        if f'/{name}' in d.attrs:
+                            return d.attrs[f'/{name}']
+                        raise KeyError(f"Attribute '{name}' not found in {list(d.attrs.keys())}")
+
                     replay_data = {
                         'root_pos': data['root_pos'][:],
                         'root_quat': data['root_quat'][:],
                         'joints': data['joints'][:],
                         'link_pos': data['link_pos'][:],
                         'link_quat': data['link_quat'][:],
-                        'joint_names': data.attrs['joint_names'].tolist(),
-                        'link_names': data.attrs['link_names'].tolist(),
-                        'fps': data.attrs['fps'] if 'fps' in data.attrs else self.default_data_fps,
+                        'joint_names': _get_attr(data, 'joint_names').tolist(),
+                        'link_names': _get_attr(data, 'link_names').tolist(),
+                        'fps': _get_attr(data, 'fps') if 'fps' in data.attrs or '/fps' in data.attrs else self.default_data_fps,
                     }
 
                     if not 'waist_yaw_joint' in replay_data['joint_names']:
