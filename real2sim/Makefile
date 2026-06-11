@@ -57,7 +57,7 @@ JAXLS_ENV := JAX_PLATFORMS=cpu XLA_FLAGS="--xla_backend_optimization_level=0 --x
 
 # --------------- Targets ---------------
 
-.PHONY: pipeline all _init_dirs preprocess reconstruct optimize postprocess retarget visualize extract-frames convert-to-adamimic
+.PHONY: pipeline all _init_dirs preprocess reconstruct optimize postprocess retarget visualize extract-frames convert-to-adamimic convert-to-protomotions convert-to-unitree-rl-lab
 
 # Create directories for the video
 _init_dirs:
@@ -229,6 +229,70 @@ convert-to-adamimic:
 	    echo "Copied joint_id.txt to $(CONVERT_OUTPUT)/"; \
 	fi && \
 	echo "Done. Run AdaMimic stage1 with: make -C ../../AdaMimic stage1 TASK=$(TASK_NAME)"
+
+# ---------- Convert to ProtoMotions (vm1rs) ----------
+# Converts retarget_poses_g1.h5 to ProtoMotions NPZ for motion training.
+# Usage:
+#   make convert-to-protomotions                                          # auto-detect input
+#   make convert-to-protomotions TASK_NAME=my_task                        # specify task name
+#   make convert-to-protomotions CONVERT_INPUT=/path/to/retarget.h5       # specify input manually
+#   make convert-to-protomotions CONVERT_SMOOTH=1                         # enable smoothing
+PROTOMOTIONS_OUTPUT ?= demo_data/$(VID_STEM)/protomotions
+convert-to-protomotions:
+	@$(CONDA_EVAL) && conda activate vm1rs && \
+	if [ -n "$(CONVERT_INPUT)" ]; then \
+	    H5_PATH="$(CONVERT_INPUT)"; \
+	else \
+	    H5_PATH=$$(for d in $(BASE_DIR)/output_calib_mesh/*/; do [ -f "$$d/retarget_poses_g1.h5" ] && echo "$$d/retarget_poses_g1.h5" && break; done); \
+	fi && \
+	if [ -z "$$H5_PATH" ] || [ ! -f "$$H5_PATH" ]; then \
+	    echo "Error: retarget_poses_g1.h5 not found. Run 'make retarget' first or set CONVERT_INPUT."; \
+	    exit 1; \
+	fi && \
+	echo "Input:  $$H5_PATH" && \
+	echo "Output: $(PROTOMOTIONS_OUTPUT)" && \
+	echo "Task:   $(TASK_NAME)" && \
+	mkdir -p $(PROTOMOTIONS_OUTPUT) && \
+	SMOOTH_FLAG=$$( [ "$(CONVERT_SMOOTH)" = "1" ] && echo "--smooth" || echo "" ) && \
+	SOURCE_FPS_FLAG=$$( [ -n "$(SOURCE_FPS)" ] && echo "--source_fps $(SOURCE_FPS)" || echo "" ) && \
+	python tools/convert_to_protomotions.py \
+	    --input "$$H5_PATH" \
+	    --output_dir $(PROTOMOTIONS_OUTPUT) \
+	    --task_name $(TASK_NAME) \
+	    --target_fps 30 \
+	    $$SMOOTH_FLAG \
+	    $$SOURCE_FPS_FLAG
+
+# ---------- Convert to unitree_rl_lab (vm1rs) ----------
+# Converts retarget_poses_g1.h5 to unitree_rl_lab NPZ for mimic training.
+# Usage:
+#   make convert-to-unitree-rl-lab                                          # auto-detect input
+#   make convert-to-unitree-rl-lab TASK_NAME=my_task                        # specify task name
+#   make convert-to-unitree-rl-lab CONVERT_INPUT=/path/to/retarget.h5       # specify input manually
+#   make convert-to-unitree-rl-lab CONVERT_SMOOTH=1                         # enable smoothing
+UNIREE_RL_LAB_OUTPUT ?= demo_data/g1_rl_lab/$(TASK_NAME).npz
+convert-to-unitree-rl-lab:
+	@$(CONDA_EVAL) && conda activate vm1rs && \
+	if [ -n "$(CONVERT_INPUT)" ]; then \
+	    H5_PATH="$(CONVERT_INPUT)"; \
+	else \
+	    H5_PATH=$$(for d in $(BASE_DIR)/output_calib_mesh/*/; do [ -f "$$d/retarget_poses_g1.h5" ] && echo "$$d/retarget_poses_g1.h5" && break; done); \
+	fi && \
+	if [ -z "$$H5_PATH" ] || [ ! -f "$$H5_PATH" ]; then \
+	    echo "Error: retarget_poses_g1.h5 not found. Run 'make retarget' first or set CONVERT_INPUT."; \
+	    exit 1; \
+	fi && \
+	echo "Input:  $$H5_PATH" && \
+	echo "Output: $(UNIREE_RL_LAB_OUTPUT)" && \
+	mkdir -p $$(dirname $(UNIREE_RL_LAB_OUTPUT)) && \
+	SMOOTH_FLAG=$$( [ "$(CONVERT_SMOOTH)" = "1" ] && echo "--smooth" || echo "" ) && \
+	SOURCE_FPS_FLAG=$$( [ -n "$(SOURCE_FPS)" ] && echo "--source_fps $(SOURCE_FPS)" || echo "" ) && \
+	python tools/convert_to_unitree_rl_lab.py \
+	    --input "$$H5_PATH" \
+	    --output $(UNIREE_RL_LAB_OUTPUT) \
+	    --target_fps 50 \
+	    $$SMOOTH_FLAG \
+	    $$SOURCE_FPS_FLAG
 
 # ---------- Utility: extract frames ----------
 # Auto-detect total frames via ffprobe if END_FRAME not set
