@@ -9,7 +9,7 @@ The pipeline requires two separate conda environments due to dependency conflict
 | Environment | Name | Python | CUDA | Purpose |
 |------------|------|--------|------|---------|
 | **Main** | `vm1rs` | 3.12 | 12.4+ | Human preprocessing, optimization, retargeting |
-| **Reconstruction** | `vm1reocn` | 3.10 | 11.8 | MegaSam, NKSR meshification, GeoCalib |
+| **Reconstruction** | `vm1recon` | 3.10 | 11.8 | MegaSam, NKSR meshification, GeoCalib |
 
 > **Why two environments?** MegaSam requires xformers ≤0.0.27 (due to deprecated NyquistAttention) which only compiles with CUDA 11.8. NKSR is also tied to CUDA 11.8.
 
@@ -161,7 +161,7 @@ cd ../..
 pip install git+https://github.com/warmshao/WiLoR-mini
 ```
 
-### 2. Reconstruction Environment (`vm1reocn`)
+### 2. Reconstruction Environment (`vm1recon`)
 
 This environment handles MegaSam reconstruction, NKSR meshification, and GeoCalib operations.
 
@@ -205,8 +205,18 @@ cd ../..
 # NKSR for fast meshification
 conda install -c pyg -c nvidia -c conda-forge pytorch-lightning=1.9.4 tensorboard pybind11 pyg rich pandas omegaconf
 pip install -f https://pycg.huangjh.tech/packages/index.html python-pycg[full]==0.5.2 randomname pykdtree plyfile flatten-dict pyntcloud
-pip install nksr -f https://nksr.huangjh.tech/whl/torch-2.0.0+cu118.html
 pip install trimesh tyro h5py rtree
+
+# Install NKSR from source. The nksr wheel index can be unavailable or can
+# resolve to an empty 0.0.0 package without nksr.Reconstructor.
+git clone --depth 1 https://github.com/nv-tlabs/NKSR.git /tmp/NKSR
+cd /tmp/NKSR/package
+git clone https://github.com/AcademySoftwareFoundation/openvdb.git external/openvdb
+git -C external/openvdb checkout 7edd8cd86f105a01a41ad7b2bf59a81034cd79fb
+git clone https://gitlab.com/libeigen/eigen.git external/eigen
+git -C external/eigen checkout 3.4
+python -m pip install --no-build-isolation /tmp/NKSR/package
+python -c "import torch, nksr; r=nksr.Reconstructor(torch.device('cuda')); print(nksr.__version__, type(r).__name__)"
 cd ..
 
 # GeoCalib for gravity calibration
@@ -225,10 +235,104 @@ Always activate the correct environment before running commands:
 conda activate vm1rs
 
 # For MegaSam reconstruction and postprocessing
-conda activate vm1reocn
+conda activate vm1recon
 ```
 
 See [commands.md](./commands.md) for detailed usage instructions.
+
+## Benchverse HTTP Service on 5051
+
+Benchverse calls this real2sim pipeline through the HTTP service in
+`/home/ubuntu22/sourcecode/VideoMimic/real2sim/server/server.py`.
+
+On the 5051 host:
+
+```bash
+cd /home/ubuntu22/sourcecode/VideoMimic/real2sim
+make serve
+curl http://127.0.0.1:8090/api/health
+```
+
+The Benchverse skill server at `:5052` can also manage this service:
+
+```bash
+curl http://127.0.0.1:5052/api/services/real2sim/status
+curl -X POST http://127.0.0.1:5052/api/services/real2sim/restart
+```
+
+The HTTP server must pass the uploaded job video to the Makefile with
+`VIDEO_PATH`, not `VIDEO_NAME`:
+
+```python
+make_cmd = (
+    f'{CONDA_EVAL} && '
+    f'export HF_TOKEN=${{HF_TOKEN:-}} && '
+    f'make pipeline VIDEO_PATH="{video_src}" STRIDE={stride} HEIGHT={height_value} '
+    f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"'
+)
+```
+
+On the 5051 deployment, the default stride should be `4` for 16GB GPUs:
+
+```makefile
+STRIDE ?= 4
+```
+
+```python
+stride: int = Form(4)
+```
+
+`VIDEO_NAME` does not override the Makefile input video. If it is used, the
+pipeline can silently fall back to the default `assets/sitting_standing.mp4`
+and write outputs under `demo_data/sitting_standing`. Uploaded files should be
+stored under the sanitized `video_stem + suffix` so the Makefile's
+`VID_STEM := $(basename $(notdir $(VIDEO_PATH)))` matches the server result
+collection path.
+
+If postprocessing fails in `meshification.py` with
+`TypeError: 'NoneType' object is not callable` at `np.sum(...)`, avoid
+`np.sum` in the weighted depth interpolation and use `np.dot` with finite
+neighbor guards. This has been verified on the `talented-urban-woman-dancing`
+job with `subsample_4`.
+
+Real2Sim output is an h5 file such as `retarget_poses_g1.h5`. Before RL
+training, Benchverse skill server converts it in unitree_rl_lab:
+
+```bash
+cd /home/ubuntu22/sourcecode/unitree_rl_lab
+python scripts/mimic/convert_videomimic_to_npz.py \
+  -i "<job>/input/retarget_poses_g1.h5" \
+  -o "<job>/motion.npz" \
+  --target_fps 50
+```
+
+The equivalent Makefile target in unitree_rl_lab is:
+
+```bash
+make convert-videomimic \
+  VM_H5="<job>/input/retarget_poses_g1.h5" \
+  CONVERT_NPZ="<job>/motion.npz" \
+  CONVERT_FPS=50
+```
+
+Current known-good checks on 5051:
+
+```bash
+/home/ubuntu22/miniforge3/envs/vm1recon/bin/python \
+  -c "import torch, nksr; r=nksr.Reconstructor(torch.device('cuda')); print(nksr.__version__, type(r).__name__)"
+
+/usr/bin/env -C /home/ubuntu22/sourcecode/VideoMimic/real2sim \
+  /home/ubuntu22/miniforge3/envs/vm1recon/bin/python \
+  stage3_postprocessing/postprocessing_pipeline.py \
+  --megahunter-path demo_data/sitting_standing/output_smpl_and_points/megahunter_megasam_reconstruction_results_input_images_cam01_frame_1_111_subsample_2.h5 \
+  --out-dir /tmp/nksr_postprocess_test \
+  --gender male \
+  --is-megasam
+```
+
+If a long uploaded video now fails with CUDA OOM during reconstruction, that is
+separate from the `VIDEO_PATH` and NKSR fixes. Shorten the clip, increase
+`STRIDE`, or free GPU memory.
 
 ## Troubleshooting
 
@@ -236,7 +340,7 @@ See [commands.md](./commands.md) for detailed usage instructions.
 
 1. **CUDA Version Mismatch**
    - Ensure CUDA 12.4+ is available for `vm1rs`
-   - Ensure CUDA 11.8 is available for `vm1reocn`
+   - Ensure CUDA 11.8 is available for `vm1recon`
 
 2. **Memory Errors**
    - MegaSam: Requires ~24GB+ GPU memory for 300 frames
@@ -246,6 +350,10 @@ See [commands.md](./commands.md) for detailed usage instructions.
 3. **Import Errors**
    - Verify you're in the correct conda environment
    - Check that all installation steps completed without errors
+
+4. **`AttributeError: module 'nksr' has no attribute 'Reconstructor'`**
+   - This usually means the empty PyPI `nksr==0.0.0` package was installed.
+   - Reinstall NKSR from `/tmp/NKSR/package` with `--no-build-isolation` as shown above.
 
 ### Getting Help
 

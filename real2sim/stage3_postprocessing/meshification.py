@@ -63,11 +63,21 @@ def infill_depth_in_convex_hull_weighted(depth_map, mask, k=4, power=2.0):
 
     # Indices where we have valid (hit) data
     hit_indices = np.array(np.where(restricted_mask)).T  # shape: (N_hit, 2) -> (row, col)
+    if len(hit_indices) == 0:
+        return filled_depth_map, np.empty((0, 2), dtype=int)
+
     # Corresponding depth values
     hit_depths = depth_map[hit_indices[:, 0], hit_indices[:, 1]]
+    finite_hits = np.isfinite(hit_depths)
+    if not np.all(finite_hits):
+        hit_indices = hit_indices[finite_hits]
+        hit_depths = hit_depths[finite_hits]
+        if len(hit_indices) == 0:
+            return filled_depth_map, np.empty((0, 2), dtype=int)
 
     # Build a KD-tree for fast k-NN lookup
     kd_tree = cKDTree(hit_indices)
+    query_k = min(k, len(hit_indices))
 
     # Indices where we're missing data but inside the hull
     miss_indices = np.array(np.where(~mask & hull_mask)).T  # shape: (N_miss, 2)
@@ -75,20 +85,29 @@ def infill_depth_in_convex_hull_weighted(depth_map, mask, k=4, power=2.0):
     # For each missing pixel, compute the k-NN among hit pixels
     # Then do inverse-distance weighted interpolation of the hit depths
     for miss_rc in miss_indices:
-        dist, nn_idx = kd_tree.query(miss_rc, k=k)
+        dist, nn_idx = kd_tree.query(miss_rc, k=query_k)
 
-        # If k=1, dist and nn_idx will be scalars, make them arrays
-        if k == 1:
-            dist = np.array([dist])
-            nn_idx = np.array([nn_idx])
+        # If k=1, dist and nn_idx will be scalars, make them arrays.
+        dist = np.atleast_1d(dist)
+        nn_idx = np.atleast_1d(nn_idx)
+        valid_neighbors = np.isfinite(dist) & (nn_idx >= 0) & (nn_idx < len(hit_depths))
+        if not np.any(valid_neighbors):
+            continue
+        dist = dist[valid_neighbors]
+        nn_idx = nn_idx[valid_neighbors]
 
         # Inverse distance weights: w_i = 1 / (dist_i^p + epsilon)
         # epsilon is to prevent division by zero
         epsilon = 1e-8
         weights = 1.0 / (dist**power + epsilon)
+        denominator = np.dot(weights, np.ones_like(weights))
+        if not np.isfinite(denominator) or denominator <= 0:
+            continue
 
-        # Weighted average of the depths
-        weighted_depth = np.sum(hit_depths[nn_idx] * weights) / np.sum(weights)
+        # Weighted average of the depths. Avoid np.sum here because this code
+        # runs after NKSR/Open3D imports, where numpy ufunc.reduce has been
+        # observed to become unusable in the vm1recon process.
+        weighted_depth = np.dot(hit_depths[nn_idx], weights) / denominator
         filled_depth_map[miss_rc[0], miss_rc[1]] = weighted_depth
 
     return filled_depth_map, miss_indices

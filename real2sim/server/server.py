@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -54,6 +55,10 @@ VISER_URL = os.environ.get("VIDEOMIMIC_VISER_URL", "http://127.0.0.1:8081")
 # Conda envs used by the pipeline
 CONDA_VM1RS = "vm1rs"
 CONDA_VM1RECON = "vm1recon"
+
+# Post-pipeline：把 retarget h5 落到 benchverse jobs/ 并转成 motion.npz（RL 训练输入）。
+BENCHVERSE_JOBS_DIR = Path(os.environ.get("BENCHVERSE_JOBS_DIR", "/home/ubuntu22/sourcecode/benchverse-skill-server/jobs"))
+RL_LAB_DIR = Path(os.environ.get("RL_LAB_DIR", "/home/ubuntu22/sourcecode/unitree_rl_lab"))
 
 # Stage progression (order matters)
 STAGES = [
@@ -191,6 +196,63 @@ def _collect_result_files(video_stem: str) -> list[dict]:
                     "size": f.stat().st_size,
                 })
     return results
+
+
+def _safe_stem(name: str, fallback: str = "skill_job") -> str:
+    """benchverse 风格的 job 目录前缀：视频名 stem，非 [A-Za-z0-9._-] 替成 _。"""
+    raw = Path(name or fallback).name
+    stem = Path(raw).stem or raw or fallback
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return safe or fallback
+
+
+async def _stage_rl_lab_input(job_id: str, video_filename: str, video_stem: str) -> dict:
+    """real2sim 成功后：把 retarget h5 落到 benchverse jobs/ 并转成 motion.npz（RL 训练输入）。
+
+    best-effort：转换失败只记到返回的 dict 里（写入 status['rl_lab']），不让 real2sim job 翻车。
+    """
+    try:
+        h5s = sorted((DEMO_DATA_DIR / video_stem / "output_calib_mesh").glob("*/retarget_poses_g1.h5"))
+        if not h5s:
+            raise RuntimeError("retarget_poses_g1.h5 not found under output_calib_mesh")
+        h5_src = h5s[-1]
+
+        prefix = _safe_stem(video_filename)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bv_job = BENCHVERSE_JOBS_DIR / f"{prefix}_{stamp}"
+        (bv_job / "input").mkdir(parents=True, exist_ok=True)
+        h5_dst = bv_job / "input" / "retarget_poses_g1.h5"
+        shutil.copy2(h5_src, h5_dst)
+
+        npz_dst = bv_job / "motion.npz"
+        cmd = (
+            f'make -C "{RL_LAB_DIR}" convert-videomimic '
+            f'VM_H5="{h5_dst}" CONVERT_NPZ="{npz_dst}"'
+        )
+        logger.info("[%s] rl_lab convert: %s", job_id, cmd)
+        _append_job_log(job_id, f"$ {cmd}")
+        proc = await asyncio.create_subprocess_shell(
+            cmd, executable="/bin/bash",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            cwd=str(REAL2SIM_DIR), env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        tail: list[str] = []
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            tail.append(line)
+            tail = tail[-200:]
+            logger.info("[%s] %s", job_id, line)
+            _append_job_log(job_id, line)
+        await proc.wait()
+        rc = proc.returncode or 0
+        if rc != 0:
+            raise RuntimeError(f"convert-videomimic exit {rc}: {' | '.join(tail[-10:])}")
+        logger.info("[%s] staged rl_lab input -> %s", job_id, npz_dst)
+        return {"status": "ok", "job_dir": str(bv_job), "motion_npz": str(npz_dst)}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[%s] rl_lab convert failed: %s", job_id, e)
+        return {"status": "error", "error": str(e)}
 
 
 def _height_arg(height: float) -> str:
@@ -423,7 +485,7 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
         make_cmd = (
             f'{CONDA_EVAL} && '
             f'export HF_TOKEN=${{HF_TOKEN:-}} && '
-            f'make pipeline VIDEO_NAME="{video_stem}" STRIDE={stride} HEIGHT={height_value} '
+            f'make pipeline VIDEO_PATH="{video_src}" STRIDE={stride} HEIGHT={height_value} '
             f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"'
         )
 
@@ -446,6 +508,14 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
             "result_files": result_files,
         })
         logger.info("[%s] Pipeline completed with %s result files", job_id, len(result_files))
+
+        # Post-pipeline：落 h5 到 benchverse jobs/ 并转 motion.npz（RL 训练输入）
+        rl_lab = await _stage_rl_lab_input(
+            job_id,
+            _read_status(job_id).get("video_filename", f"{video_stem}.mp4"),
+            video_stem,
+        )
+        _write_status(job_id, {**_read_status(job_id), "rl_lab": rl_lab})
 
     except Exception as e:
         logger.exception("[%s] Pipeline failed: %s", job_id, e)
@@ -556,7 +626,7 @@ async def proxy_viser_websocket(websocket: WebSocket, path: str = ""):
 @app.post("/api/pipeline", response_model=JobStatus)
 async def submit_pipeline(
     video: UploadFile = File(...),  # noqa: B008
-    stride: int = Form(2),  # noqa: B008
+    stride: int = Form(4),  # noqa: B008  # 16G 显存防 OOM：默认每 4 帧取 1 帧
     height: float = Form(-1),  # noqa: B008
     robot: str = Form("g1"),  # noqa: B008
     gender: str = Form("male"),  # noqa: B008
@@ -578,7 +648,8 @@ async def submit_pipeline(
     input_dir.mkdir(parents=True, exist_ok=True)
 
     # Save uploaded video
-    video_path = input_dir / video.filename
+    video_filename = f"{video_stem}{Path(video.filename).suffix}"
+    video_path = input_dir / video_filename
     content = await video.read()
     video_path.write_bytes(content)
     logger.info(
@@ -601,7 +672,8 @@ async def submit_pipeline(
         "progress": 0.0,
         "error_message": None,
         "video_stem": video_stem,
-        "video_filename": video.filename,
+        "video_filename": video_filename,
+        "original_video_filename": video.filename,
         "robot": robot,
         "gender": gender,
         "result_files": [],

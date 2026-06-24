@@ -3,7 +3,7 @@ SHELL := /bin/bash
 # --------------- Configurable variables ---------------
 # VIDEO_PATH: path to the video file (e.g. assets/sitting_standing.mp4)
 VIDEO_PATH  ?= ./assets/sitting_standing.mp4
-STRIDE      ?= 2
+STRIDE      ?= 4
 ROBOT       ?= g1
 HEIGHT      ?= -1
 VIS         ?= 0
