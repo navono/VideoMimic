@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -115,6 +116,11 @@ def _setup_logging() -> logging.Logger:
 
 logger = _setup_logging()
 
+# Active subprocess group leaders by job. Each pipeline command is launched in
+# its own process group so cancellation can terminate the shell, make, and all
+# Python children instead of only matching one command line with pkill.
+RUNNING_PROCESS_GROUPS: dict[str, set[int]] = {}
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -162,6 +168,8 @@ def _write_status(job_id: str, data: dict) -> None:
 
 def _mark_stage(job_id: str, stage: str, progress: float) -> None:
     data = _read_status(job_id)
+    if data.get("status") == "cancelled":
+        return
     stage_timestamps = dict(data.get("stage_timestamps") or {})
     stage_timestamps.setdefault(stage, datetime.now(UTC).isoformat())
     _write_status(job_id, {
@@ -206,6 +214,18 @@ def _safe_stem(name: str, fallback: str = "skill_job") -> str:
     return safe or fallback
 
 
+def _new_job_id(video_filename: str) -> str:
+    """Create a stable, readable job id used as both API job id and VideoMimic VID_STEM."""
+    prefix = _safe_stem(video_filename, fallback="real2sim_job")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"{prefix}_{stamp}"
+    for _ in range(10):
+        candidate = base if _ == 0 else f"{base}_{uuid.uuid4().hex[:4]}"
+        if not _job_dir(candidate).exists() and not (DEMO_DATA_DIR / candidate).exists():
+            return candidate
+    return f"{base}_{uuid.uuid4().hex[:8]}"
+
+
 async def _stage_rl_lab_input(job_id: str, video_filename: str, video_stem: str) -> dict:
     """real2sim 成功后：把 retarget h5 落到 benchverse jobs/ 并转成 motion.npz（RL 训练输入）。
 
@@ -217,9 +237,7 @@ async def _stage_rl_lab_input(job_id: str, video_filename: str, video_stem: str)
             raise RuntimeError("retarget_poses_g1.h5 not found under output_calib_mesh")
         h5_src = h5s[-1]
 
-        prefix = _safe_stem(video_filename)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bv_job = BENCHVERSE_JOBS_DIR / f"{prefix}_{stamp}"
+        bv_job = BENCHVERSE_JOBS_DIR / job_id
         (bv_job / "input").mkdir(parents=True, exist_ok=True)
         h5_dst = bv_job / "input" / "retarget_poses_g1.h5"
         shutil.copy2(h5_src, h5_dst)
@@ -302,6 +320,88 @@ def _append_job_log(job_id: str, line: str) -> None:
     with log_path.open("a", encoding="utf-8") as f:
         f.write(line)
         f.write("\n")
+
+
+def _is_cancelled(job_id: str) -> bool:
+    try:
+        return _read_status(job_id).get("status") == "cancelled"
+    except HTTPException:
+        return False
+
+
+def _register_process_group(job_id: str, pid: int) -> None:
+    RUNNING_PROCESS_GROUPS.setdefault(job_id, set()).add(pid)
+    try:
+        data = _read_status(job_id)
+        _write_status(job_id, {**data, "process_groups": sorted(RUNNING_PROCESS_GROUPS[job_id])})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[%s] Failed to record process group %s: %s", job_id, pid, exc)
+
+
+def _unregister_process_group(job_id: str, pid: int) -> None:
+    groups = RUNNING_PROCESS_GROUPS.get(job_id)
+    if not groups:
+        return
+    groups.discard(pid)
+    if groups:
+        RUNNING_PROCESS_GROUPS[job_id] = groups
+    else:
+        RUNNING_PROCESS_GROUPS.pop(job_id, None)
+
+
+def _terminate_process_group(job_id: str, pgid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pgid, sig)
+        logger.info("[%s] Sent %s to process group %s", job_id, sig.name, pgid)
+    except ProcessLookupError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[%s] Failed to send %s to process group %s: %s", job_id, sig.name, pgid, exc)
+
+
+async def _terminate_job_processes(job_id: str, data: dict | None = None) -> None:
+    data = data or _read_status(job_id)
+    process_groups = set(RUNNING_PROCESS_GROUPS.get(job_id, set()))
+    process_groups.update(int(p) for p in data.get("process_groups", []) if str(p).isdigit())
+
+    for pgid in process_groups:
+        _terminate_process_group(job_id, pgid, signal.SIGTERM)
+
+    # Fallback for jobs launched before process-group tracking, or for children
+    # whose command line still carries the job-specific paths.
+    patterns = {
+        job_id,
+        data.get("video_stem"),
+        data.get("video_filename"),
+        str(_job_dir(job_id)),
+    }
+    for pattern in sorted(p for p in patterns if p):
+        try:
+            result = subprocess.run(
+                ["pkill", "-TERM", "-f", pattern],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                logger.info("[%s] Fallback pkill TERM matched pattern %s", job_id, pattern)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] Fallback pkill TERM failed for %s: %s", job_id, pattern, exc)
+
+    await asyncio.sleep(1.0)
+
+    for pgid in process_groups:
+        _terminate_process_group(job_id, pgid, signal.SIGKILL)
+    for pattern in sorted(p for p in patterns if p):
+        try:
+            subprocess.run(
+                ["pkill", "-KILL", "-f", pattern],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] Fallback pkill KILL failed for %s: %s", job_id, pattern, exc)
 
 
 def _cleanup_old_jobs() -> None:
@@ -403,7 +503,9 @@ async def _run_logged_command(
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(REAL2SIM_DIR),
         env=env,
+        start_new_session=True,
     )
+    _register_process_group(job_id, proc.pid)
 
     if proc.stdout is None:
         raise RuntimeError(f"{label} did not expose stdout")
@@ -412,27 +514,38 @@ async def _run_logged_command(
     stage_progress_base = {0: 0.0, 1: 0.15, 2: 0.30, 3: 0.50, 4: 0.70, 5: 0.85}
     tail_lines: list[str] = []
 
-    async for line_bytes in proc.stdout:
-        line = line_bytes.decode(errors="replace").rstrip()
-        tail_lines.append(line)
-        tail_lines = tail_lines[-200:]
+    try:
+        async for line_bytes in proc.stdout:
+            if _is_cancelled(job_id):
+                _append_job_log(job_id, f"{label} cancellation requested; terminating process group")
+                await _terminate_job_processes(job_id)
+                break
 
-        logger.info("[%s] %s", job_id, line)
-        _append_job_log(job_id, line)
+            line = line_bytes.decode(errors="replace").rstrip()
+            tail_lines.append(line)
+            tail_lines = tail_lines[-200:]
 
-        detected = _detect_stage(line)
-        if detected:
-            stage_idx = STAGES.index(detected) if detected in STAGES else current_stage_idx
-            if stage_idx > current_stage_idx:
-                current_stage_idx = stage_idx
-                progress = stage_progress_base.get(stage_idx, 0.9)
-                _mark_stage(job_id, detected, progress)
-                logger.info("[%s] Stage changed to %s (progress %.2f)", job_id, detected, progress)
+            logger.info("[%s] %s", job_id, line)
+            _append_job_log(job_id, line)
 
-    await proc.wait()
-    logger.info("[%s] Finished %s with exit code %s", job_id, label, proc.returncode)
-    _append_job_log(job_id, f"{label} exited with code {proc.returncode}")
-    return proc.returncode or 0, tail_lines
+            detected = _detect_stage(line)
+            if detected:
+                stage_idx = STAGES.index(detected) if detected in STAGES else current_stage_idx
+                if stage_idx > current_stage_idx:
+                    current_stage_idx = stage_idx
+                    progress = stage_progress_base.get(stage_idx, 0.9)
+                    _mark_stage(job_id, detected, progress)
+                    logger.info("[%s] Stage changed to %s (progress %.2f)", job_id, detected, progress)
+
+        await proc.wait()
+        logger.info("[%s] Finished %s with exit code %s", job_id, label, proc.returncode)
+        _append_job_log(job_id, f"{label} exited with code {proc.returncode}")
+        return proc.returncode or 0, tail_lines
+    finally:
+        if _is_cancelled(job_id) and proc.returncode is None:
+            await _terminate_job_processes(job_id)
+            await proc.wait()
+        _unregister_process_group(job_id, proc.pid)
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +589,9 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
             extract_cmd,
             stage_start_index=0,
         )
+        if _is_cancelled(job_id):
+            logger.info("[%s] Pipeline cancelled during frame extraction", job_id)
+            return
         if exit_code != 0:
             raise RuntimeError(f"Frame extraction failed: {' | '.join(tail_lines[-20:])}")
 
@@ -485,7 +601,7 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
         make_cmd = (
             f'{CONDA_EVAL} && '
             f'export HF_TOKEN=${{HF_TOKEN:-}} && '
-            f'make pipeline VIDEO_PATH="{video_src}" STRIDE={stride} HEIGHT={height_value} '
+            f'make pipeline VIDEO_PATH="{video_src}" VID_STEM="{video_stem}" STRIDE={stride} HEIGHT={height_value} '
             f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"'
         )
 
@@ -495,6 +611,9 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
             make_cmd,
             stage_start_index=1,
         )
+        if _is_cancelled(job_id):
+            logger.info("[%s] Pipeline cancelled during real2sim pipeline", job_id)
+            return
         if exit_code != 0:
             raise RuntimeError(f"Pipeline failed (exit {exit_code}): {' | '.join(tail_lines[-20:])}")
 
@@ -518,6 +637,9 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
         _write_status(job_id, {**_read_status(job_id), "rl_lab": rl_lab})
 
     except Exception as e:
+        if _is_cancelled(job_id):
+            logger.info("[%s] Pipeline stopped after cancellation", job_id)
+            return
         logger.exception("[%s] Pipeline failed: %s", job_id, e)
         _write_status(job_id, {
             **_read_status(job_id),
@@ -638,11 +760,11 @@ async def submit_pipeline(
         raise HTTPException(status_code=400, detail="No filename provided")
     _height_arg(height)
 
-    # Sanitize video stem
-    video_stem = Path(video.filename).stem
-    video_stem = re.sub(r"[^\w\-.]", "_", video_stem)
-
-    job_id = uuid.uuid4().hex[:12]
+    original_video_stem = _safe_stem(video.filename, fallback="real2sim_job")
+    job_id = _new_job_id(video.filename)
+    # VideoMimic's Makefile writes to demo_data/$(VID_STEM). Use the unique
+    # job id so repeated uploads of the same filename cannot reuse old outputs.
+    video_stem = job_id
     job_dir = _job_dir(job_id)
     input_dir = job_dir / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -672,6 +794,7 @@ async def submit_pipeline(
         "progress": 0.0,
         "error_message": None,
         "video_stem": video_stem,
+        "original_video_stem": original_video_stem,
         "video_filename": video_filename,
         "original_video_filename": video.filename,
         "robot": robot,
@@ -736,26 +859,17 @@ async def start_job_viser(job_id: str):
 @app.delete("/api/jobs/{job_id}")
 async def cancel_job(job_id: str):
     data = _read_status(job_id)
+    if data.get("status") == "cancelled":
+        return {"detail": "Job already cancelled"}
     if data.get("status") not in ("pending", "running"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel job in status: {data.get('status')}")
 
-    # Kill any running make process for this job
-    try:
-        result = subprocess.run(
-            ["pkill", "-f", f"make pipeline.*{data.get('video_stem', job_id)}"],
-            capture_output=True,
-            check=False,
-            timeout=5,
-        )
-        logger.info("[%s] Cancel pkill exited with %s", job_id, result.returncode)
-    except Exception as e:
-        logger.warning("[%s] Cancel pkill failed: %s", job_id, e)
-
     _write_status(job_id, {
         **data,
-        "status": "failed",
+        "status": "cancelled",
         "error_message": "Cancelled by user",
     })
+    await _terminate_job_processes(job_id, data)
     return {"detail": "Job cancelled"}
 
 
