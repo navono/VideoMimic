@@ -390,6 +390,7 @@ def main(
     is_megasam: bool = True,
     save_ego_view: bool = False,
     no_spf: bool = True,
+    port: int = 8089,
 ) -> None:
     """
     Main visualization function for complete pipeline results.
@@ -401,6 +402,7 @@ def main(
         is_megasam: Whether results are from MegaSam or Align3r
         save_ego_view: Whether to save ego-view images to disk
         no_spf: Whether to use less filtered (True) or more filtered (False) point cloud
+        port: Dedicated HTTP/WebSocket port for the Real2Sim Viser instance
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
@@ -572,7 +574,7 @@ def main(
     # Start Viser Visualization
     # ========================================================================
     
-    server = viser.ViserServer(port=8081)
+    server = viser.ViserServer(port=port)
     
     # Initialize camera follow functions
     stop_camera_follow = None
@@ -1156,7 +1158,7 @@ def main(
         
     # Start playback loop
     print(f"Starting visualization with {num_frames} frames")
-    print(f"Open browser to http://localhost:8081")
+    print(f"Open browser to http://localhost:{port}")
     
     while True:
         if gui_playing.value:

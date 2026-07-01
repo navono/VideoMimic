@@ -51,7 +51,8 @@ CONDA_EVAL = f"source {CONDA_SH} && conda activate"
 DEFAULT_PORT = 8090
 DEFAULT_PROXY = "http://127.0.0.1:18899"
 PROXY_URL = os.environ.get("VIDEOMIMIC_PROXY", DEFAULT_PROXY)
-VISER_URL = os.environ.get("VIDEOMIMIC_VISER_URL", "http://127.0.0.1:8081")
+VISER_PORT = int(os.environ.get("VIDEOMIMIC_VISER_PORT", "8089"))
+VISER_URL = os.environ.get("VIDEOMIMIC_VISER_URL", f"http://127.0.0.1:{VISER_PORT}")
 
 # Conda envs used by the pipeline
 CONDA_VM1RS = "vm1rs"
@@ -459,7 +460,7 @@ def _start_final_viser(job_id: str, data: dict) -> None:
         f'{CONDA_EVAL} && conda activate {CONDA_VM1RS} && '
         f'python visualization/complete_results_egoview_visualization.py '
         f'--postprocessed-dir "{postprocessed_dir}" '
-        f'--robot-name "{robot}" --is-megasam'
+        f'--robot-name "{robot}" --is-megasam --port {VISER_PORT}'
     )
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     with log_path.open("ab") as log_file:
@@ -670,7 +671,7 @@ async def health():
 @app.api_route("/api/viser", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 @app.api_route("/api/viser/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def proxy_viser(request: Request, path: str = ""):
-    """Proxy the transient Viser UI on localhost:8081 through this API server."""
+    """Proxy the transient Real2Sim Viser UI through this API server."""
     target = f"{VISER_URL.rstrip('/')}/{path}"
     if request.url.query:
         target = f"{target}?{request.url.query}"
