@@ -52,8 +52,11 @@ PROXY_ENV := $(if $(PROXY),http_proxy=$(PROXY) https_proxy=$(PROXY),) HF_TOKEN=$
 # The jaxls FK-jacobian kernels crash XLA's compiler (both the CPU LLVM backend
 # and the WSL2 CUDA plugin) at full optimization. Force CPU and lower the XLA
 # optimization level so the solves compile cleanly (~90s for 100 timesteps).
-# Only affects JAX; torch GPU work in these stages is unaffected.
-JAXLS_ENV := JAX_PLATFORMS=cpu XLA_FLAGS="--xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true"
+# JAX stages (megahunter optimization, retargeting) run on GPU for speed.
+# Previously forced JAX_PLATFORMS=cpu (torch GPU work is unaffected either way),
+# but CPU made megahunter take ~20min; on a 24GB GPU stride=2 (~150 frames) fits
+# comfortably. If you hit OOM, raise STRIDE or restore JAX_PLATFORMS=cpu.
+JAXLS_ENV := XLA_FLAGS="--xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true"
 
 # --------------- Targets ---------------
 
@@ -335,16 +338,16 @@ serve-install:
 # Foreground (for development / debugging)
 serve:
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	python server/server.py
+	python -m server
 
 # Background (for production / persistent)
 serve-bg:
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	nohup python server/server.py > $(SERVER_LOG) 2>&1 & echo "PID=$$!"
+	nohup python -m server > $(SERVER_LOG) 2>&1 & echo "PID=$$!"
 
 # Stop background server
 serve-stop:
-	@pkill -f 'python server/server.py' 2>/dev/null && echo 'Server stopped' || echo 'No server running'
+	@pkill -f 'python -m server' 2>/dev/null && echo 'Server stopped' || echo 'No server running'
 
 # Tail server log
 serve-log:

@@ -62,6 +62,30 @@ cd ViTPose
 pip install -v -e .
 # If error above, do `pip install numpy cython wheel` first
 cd ../..
+```
+
+<details>
+<summary>Troubleshooting: ViTPose crashes with numpy 2.x ("setting an array element with a sequence")</summary>
+
+The bundled `mmpose` (0.24.0) in `third_party/ViTPose` is not compatible with **numpy 2.x**, which tends to get pulled in alongside `jax`/`torch>=2.5`. With numpy 2.x, ViTPose crashes during preprocessing:
+
+```
+File ".../third_party/ViTPose/mmpose/models/heads/topdown_heatmap_base_head.py", line 71
+    score[i] = np.array(img_metas[i]['bbox_score']).reshape(-1)
+ValueError: setting an array element with a sequence.
+```
+
+Fix — edit that one line in `thirdparty/ViTPose/mmpose/models/heads/topdown_heatmap_base_head.py` to coerce to a scalar:
+
+```python
+score[i] = float(np.array(img_metas[i]['bbox_score']).reshape(-1)[0])
+```
+
+(numpy 2.x no longer allows assigning an array into a scalar slot; `bbox_score` arrives as an array. The `[0]` + `float()` wrapper restores the numpy 1.x behavior.)
+
+</details>
+
+```bash
 
 # 3. VIMO (3D human mesh - primary method)
 pip install git+https://github.com/hongsukchoi/VIMO.git
@@ -130,6 +154,31 @@ cd viser
 pip install -e .
 cd ../..
 ```
+
+<details>
+<summary>Troubleshooting: viser "Failed to install Node.js using nodeenv" at runtime</summary>
+
+The retargeting stage instantiates `viser.ViserServer(...)` (even with visualization off — it's used to read joint names from the URDF). On first instantiation, viser auto-builds its web client and tries to install a sandboxed Node.js via `nodeenv`, which often fails on offline/restricted networks:
+
+```
+RuntimeError: Failed to install Node.js using nodeenv. To rebuild the Viser client, install nodeenv with: pip install 'nodeenv>=1.9.1'
+```
+
+Two fixes (either works):
+
+1. **Pre-build the client with a system Node.js** (recommended if Node is already installed):
+   ```bash
+   cd third_party/viser/src/viser/client
+   npm install && npm run build    # produces build/index.html
+   ```
+   With `build/index.html` present, viser skips the nodeenv path entirely.
+
+2. **Install nodeenv** so viser's autobuild can fetch Node itself:
+   ```bash
+   pip install 'nodeenv>=1.9.1'
+   ```
+
+</details>
 
 
 #### Optional: World Reconstruction (Align3r)
@@ -205,7 +254,7 @@ cd ../..
 # NKSR for fast meshification
 conda install -c pyg -c nvidia -c conda-forge pytorch-lightning=1.9.4 tensorboard pybind11 pyg rich pandas omegaconf
 pip install -f https://pycg.huangjh.tech/packages/index.html python-pycg[full]==0.5.2 randomname pykdtree plyfile flatten-dict pyntcloud
-pip install trimesh tyro h5py rtree
+pip install trimesh tyro h5py rtree open3d
 
 # Install NKSR from source. The nksr wheel index can be unavailable or can
 # resolve to an empty 0.0.0 package without nksr.Reconstructor.
@@ -220,6 +269,9 @@ python -c "import torch, nksr; r=nksr.Reconstructor(torch.device('cuda')); print
 cd ..
 
 # GeoCalib for gravity calibration
+# chumpy is required by smplx (SMPL model files are pickled with chumpy);
+# the hongsukchoi fork needs --no-build-isolation (its setup.py imports pip at build time)
+pip install --no-build-isolation git+https://github.com/hongsukchoi/chumpy
 git clone https://github.com/hongsukchoi/GeoCalib.git third_party/GeoCalib
 cd third_party/GeoCalib
 pip install -e .
