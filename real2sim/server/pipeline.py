@@ -117,15 +117,23 @@ async def stage_rl_lab_input(job_id: str, video_filename: str, video_stem: str) 
     return result
 
 
-async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float, robot: str, gender: str) -> None:
+async def run_pipeline(
+    job_id: str, video_stem: str, stride: int, height: float, robot: str, gender: str,
+    *,
+    start_frame: int | None = None,
+    end_frame: int | None = None,
+    reconstruction_method: str = "megasam",
+) -> None:
     """Execute the full real2sim pipeline for a job, updating status along the way."""
     from .jobs import job_dir
     height_value = _height_arg(height)
 
     try:
         logger.info(
-            "[%s] Pipeline submitted: video=%s stride=%s height=%s robot=%s gender=%s",
+            "[%s] Pipeline submitted: video=%s stride=%s height=%s robot=%s gender=%s "
+            "start_frame=%s end_frame=%s reconstruction_method=%s",
             job_id, video_stem, stride, height, robot, gender,
+            start_frame, end_frame, reconstruction_method,
         )
         write_status(job_id, {**read_status(job_id), "status": "running"})
         mark_stage(job_id, "extracting_frames", 0.0)
@@ -135,12 +143,15 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
         video_src = job_dir(job_id) / "input" / read_status(job_id).get("video_filename", "video.mp4")
 
         # Step 0: Extract frames
+        # None = 抽全帧（交给 Makefile 自动检测处理范围）
+        sf = 0 if start_frame is None else start_frame
+        ef = 99999 if end_frame is None else end_frame
         extract_cmd = (
             f'{CONDA_EVAL} && conda activate {CONDA_VM1RS} && '
             f'python utilities/extract_frames_from_video.py '
             f'--video-path "{video_src}" '
             f'--output-dir "{cam_dir}" '
-            f'--start-frame 0 --end-frame 99999'
+            f'--start-frame {sf} --end-frame {ef}'
         )
         exit_code, tail_lines = await run_logged_command(
             job_id, "frame extraction", extract_cmd, stage_start_index=0,
@@ -154,11 +165,18 @@ async def run_pipeline(job_id: str, video_stem: str, stride: int, height: float,
         mark_stage(job_id, "preprocessing", 0.15)
 
         # Build make pipeline command
+        is_megasam = "1" if reconstruction_method == "megasam" else "0"
+        # start_frame/end_frame 为 None 时不传，交给 Makefile 的 ?= 自动检测（ls cam_dir 首尾帧）
+        frame_args = ""
+        if start_frame is not None:
+            frame_args += f" START_FRAME={start_frame}"
+        if end_frame is not None:
+            frame_args += f" END_FRAME={end_frame}"
         make_cmd = (
             f'{CONDA_EVAL} && '
             f'export HF_TOKEN=${{HF_TOKEN:-}} && '
             f'make pipeline VIDEO_PATH="{video_src}" VID_STEM="{video_stem}" STRIDE={stride} HEIGHT={height_value} '
-            f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"'
+            f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"{frame_args} IS_MEGASAM={is_megasam}'
         )
 
         exit_code, tail_lines = await run_logged_command(

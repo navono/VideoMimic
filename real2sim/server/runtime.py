@@ -139,11 +139,12 @@ def start_final_viser(job_id: str, data: dict) -> None:
     log_path = job_dir(job_id) / "viser.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     robot = data.get("robot") or "g1"
+    is_megasam_flag = "--is-megasam" if data.get("reconstruction_method", "megasam") == "megasam" else ""
     command = (
         f'{CONDA_EVAL} && conda activate {CONDA_VM1RS} && '
         f'python visualization/complete_results_egoview_visualization.py '
         f'--postprocessed-dir "{postprocessed_dir}" '
-        f'--robot-name "{robot}" --is-megasam --port {VISER_PORT}'
+        f'--robot-name "{robot}" {is_megasam_flag} --port {VISER_PORT}'
     )
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     with log_path.open("ab") as log_file:

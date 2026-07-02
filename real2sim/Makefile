@@ -8,6 +8,11 @@ ROBOT       ?= g1
 HEIGHT      ?= -1
 VIS         ?= 0
 GENDER      ?= male
+# reconstruction method: 1 = MegaSAM (default), 0 = Align3R。
+# Align3R 的 reconstruction 分支尚未实现，仅控制下游 --is-megasam 标志与结果命名前缀。
+IS_MEGASAM  ?= 1
+IS_MEGASAM_FLAG := $(if $(filter 1,$(IS_MEGASAM)),--is-megasam,)
+RECON_PREFIX := $(if $(filter 1,$(IS_MEGASAM)),megasam,align3r)
 
 # --------------- Convert to AdaMimic variables ---------------
 # TASK_NAME:  name of the motion task (used as AdaMimic dataset folder name)
@@ -35,7 +40,7 @@ MEGAHUNTER_DIR  := $(BASE_DIR)/output_smpl_and_points
 START_FRAME ?= $(shell ls $(CAM_DIR)/*.jpg 2>/dev/null | sort | head -1 | xargs -I{} basename {} .jpg)
 END_FRAME   ?= $(shell ls $(CAM_DIR)/*.jpg 2>/dev/null | sort | tail -1 | xargs -I{} basename {} .jpg)
 
-RESULT_TAG      := megasam_reconstruction_results_$(VID_STEM)_cam01_frame_$(START_FRAME)_$(END_FRAME)_subsample_$(STRIDE)
+RESULT_TAG      := $(RECON_PREFIX)_reconstruction_results_$(VID_STEM)_cam01_frame_$(START_FRAME)_$(END_FRAME)_subsample_$(STRIDE)
 MEGASAM_OUT     := $(MEGASAM_DIR)/$(RESULT_TAG).h5
 MEGAHUNTER_OUT  := $(MEGAHUNTER_DIR)/megahunter_$(RESULT_TAG).h5
 POSTPROC_DIR    := $(BASE_DIR)/output_calib_mesh/megahunter_$(RESULT_TAG)
@@ -104,7 +109,7 @@ pipeline: _init_dirs
 	python stage3_postprocessing/postprocessing_pipeline.py \
 	    --megahunter-path "$$MEGAHUNTER_OUT" \
 	    --out-dir "$$POSTPROC_DIR" \
-	    --gender $(GENDER) --is-megasam && \
+	    --gender $(GENDER) $(IS_MEGASAM_FLAG) && \
 	echo "=== Step 4: Retargeting ===" && \
 	conda activate vm1rs && \
 	$(JAXLS_ENV) python stage4_retargeting/robot_motion_retargeting.py \
@@ -171,7 +176,7 @@ postprocess: _init_dirs
 	$(PROXY_ENV) python stage3_postprocessing/postprocessing_pipeline.py \
 	    --megahunter-path $(MEGAHUNTER_OUT) \
 	    --out-dir $(POSTPROC_DIR) \
-	    --gender $(GENDER) --is-megasam
+	    --gender $(GENDER) $(IS_MEGASAM_FLAG)
 
 # ---------- Step 4: Retargeting (vm1rs) ----------
 retarget: _init_dirs
@@ -188,7 +193,7 @@ visualize:
 	$(CONDA_EVAL) && conda activate vm1rs && \
 	$(PROXY_ENV) python visualization/complete_results_egoview_visualization.py \
 	    --postprocessed-dir "$$POSTPROC_DIR" \
-	    --robot-name $(ROBOT) --is-megasam
+	    --robot-name $(ROBOT) $(IS_MEGASAM_FLAG)
 
 # ---------- Convert to AdaMimic (vm1rs) ----------
 # Converts retarget_poses_g1.h5 to AdaMimic data.pt for stage1 training.

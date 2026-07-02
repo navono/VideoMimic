@@ -18,6 +18,7 @@ from server.jobs import (
     collect_result_files,
     new_job_id,
     safe_stem,
+    validate_task_id,
 )
 from server.pipeline import _height_arg
 from server.runtime import (
@@ -146,6 +147,7 @@ def test_stage_patterns_keys_match_stages():
 
 def test_job_status_model_defaults():
     s = JobStatus(job_id="x", status="pending")
+    assert s.task_id is None  # benchverse client 期望字段存在，默认 None
     assert s.stage is None
     assert s.progress == 0.0
     assert s.result_files == []
@@ -172,28 +174,29 @@ def _route_specs():
 
 def test_routes_present():
     specs = _route_specs()
-    # 这些是 benchverse 客户端依赖的路由,重构后必须仍在
+    # benchverse client 依赖的路由(real2sim_client.py 调 /api/tasks/*)
     for must in [
         "/api/health",
-        "/api/pipeline",
-        "/api/jobs/{job_id}",
-        "/api/jobs/{job_id}/result/{filename}",
-        "/api/jobs/{job_id}/log",
-        "/api/jobs/{job_id}/viser/start",
+        "/api/tasks",
+        "/api/tasks/{task_id}",
+        "/api/tasks/{task_id}/result/{filename}",
+        "/api/tasks/{task_id}/log",
+        "/api/tasks/{task_id}/viser/start",
     ]:
         assert must in specs, f"路由丢失: {must}"
-    # DELETE /api/jobs/{job_id}
-    assert "DELETE" in specs["/api/jobs/{job_id}"]
+    # POST /api/tasks (提交), DELETE /api/tasks/{task_id} (取消)
+    assert "POST" in specs["/api/tasks"]
+    assert "DELETE" in specs["/api/tasks/{task_id}"]
     # viser 代理路由
     assert any(p.startswith("/api/viser") for p in specs), "Viser 代理路由丢失"
 
 
-def test_submit_pipeline_defaults_and_required():
-    """POST /api/pipeline 默认值: stride=4, height=-1, robot=g1, gender=male; video 必传。"""
-    from server.app import submit_pipeline
+def test_submit_task_defaults_and_required():
+    """POST /api/tasks 默认值对齐 benchverse client; video 必传。"""
+    from server.app import submit_task
     import inspect
 
-    sig = inspect.signature(submit_pipeline)
+    sig = inspect.signature(submit_task)
 
     def _default(p):
         # Form(...) / File(...) 默认值是 fastapi 的 Form/File 对象,真实默认在其 .default
@@ -202,16 +205,19 @@ def test_submit_pipeline_defaults_and_required():
 
     # video 必传(File(...),无默认值)
     assert sig.parameters["video"].default.__class__.__name__ in ("File", "UploadFile") or sig.parameters["video"].default is ...
-    assert _default(sig.parameters["stride"]) == 4, "stride 默认必须是 4(16G 防 OOM)"
-    assert _default(sig.parameters["height"]) == -1
-    assert _default(sig.parameters["robot"]) == "g1"
-    assert _default(sig.parameters["gender"]) == "male"
+    assert _default(sig.parameters["start_frame"]) is None  # None=抽全帧，自动检测
+    assert _default(sig.parameters["end_frame"]) is None
+    assert _default(sig.parameters["subsample_factor"]) == 1
+    assert _default(sig.parameters["robot_name"]) == "g1"
+    assert _default(sig.parameters["height"]) == -1.0
+    assert _default(sig.parameters["reconstruction_method"]) == "megasam"
+    assert _default(sig.parameters["task_id"]) == ""
 
 
-def test_submit_pipeline_rejects_missing_video():
+def test_submit_task_rejects_missing_video():
     """无 video 文件 -> 422(FastAPI 必传字段),不是 500。"""
     with TestClient(app) as client:
-        resp = client.post("/api/pipeline", data={"stride": "4"})
+        resp = client.post("/api/tasks", data={"subsample_factor": "1"})
     assert resp.status_code == 422
 
 
@@ -222,14 +228,67 @@ def test_health_ok():
     assert resp.json() == {"status": "ok"}
 
 
-def test_get_job_404_for_unknown():
+def test_get_task_404_for_unknown():
     with TestClient(app) as client:
-        resp = client.get("/api/jobs/does-not-exist-xyz")
+        resp = client.get("/api/tasks/does-not-exist-xyz")
     assert resp.status_code == 404
 
 
-def test_cancel_unknown_job_404():
+def test_cancel_unknown_task_404():
     with TestClient(app) as client:
-        resp = client.delete("/api/jobs/does-not-exist-xyz")
+        resp = client.delete("/api/tasks/does-not-exist-xyz")
     # _read_status 抛 404 在 cancel 之前
     assert resp.status_code == 404
+
+
+def test_validate_task_id_rejects_path_traversal():
+    """外部 task_id 会拼进 JOBS_DIR/{id} 与 DEMO_DATA_DIR/{id},必须防穿越。"""
+    from fastapi import HTTPException
+    for bad in ["../etc", "/etc/passwd", "a/b", "a\\b", ".hidden", ".", "..", "", "  "]:
+        with pytest.raises(HTTPException) as exc:
+            validate_task_id(bad)
+        assert exc.value.status_code == 400
+
+
+def test_validate_task_id_accepts_valid_ids():
+    for valid in ["a", "task_001", "my-job.id", "ABC123", "x" * 128]:
+        assert validate_task_id(valid) == valid
+
+
+def test_submit_task_with_task_id(monkeypatch, tmp_path):
+    """传 task_id 时,响应 task_id == 传入值;不传则 server 生成。pipeline 必须 mock 避免真跑。"""
+    import server.app as app_mod
+    from server.config import DEMO_DATA_DIR, JOBS_DIR
+
+    # 重定向 jobs/demo_data 到 tmp_path,避免污染真实目录
+    monkeypatch.setattr(app_mod, "cleanup_old_jobs", lambda: None)
+    monkeypatch.setattr("server.jobs.JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr("server.jobs.DEMO_DATA_DIR", tmp_path / "demo")
+    # run_pipeline 是 asyncio.create_task 的目标,mock 成空协程
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr(app_mod, "run_pipeline", _noop)
+
+    with TestClient(app) as client:
+        # 带显式 task_id
+        resp = client.post(
+            "/api/tasks",
+            files={"video": ("clip.mp4", b"\x00\x00\x00", "video/mp4")},
+            data={"task_id": "my_explicit_task", "end_frame": "10"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["task_id"] == "my_explicit_task"
+        assert body["job_id"] == "my_explicit_task"
+        assert body["status"] == "pending"
+
+        # 不传 task_id -> server 生成(非空,且 task_id == job_id)
+        resp2 = client.post(
+            "/api/tasks",
+            files={"video": ("clip2.mp4", b"\x00\x00\x00", "video/mp4")},
+            data={"end_frame": "10"},
+        )
+        assert resp2.status_code == 200, resp2.text
+        body2 = resp2.json()
+        assert body2["task_id"]
+        assert body2["task_id"] == body2["job_id"]

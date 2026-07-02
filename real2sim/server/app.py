@@ -1,15 +1,16 @@
 """FastAPI app: routes + main(). Behaves 1:1 like the single-file server.py.
 
-Routes/params/defaults preserved exactly (benchverse client contract):
+Routes/params/defaults match the benchverse client contract (real2sim_client.py):
   GET  /api/health
   ANY  /api/viser, /api/viser/{path}            (HTTP proxy to transient viser)
   WS   /api/viser, /api/viser/{path}            (WebSocket proxy)
-  POST /api/pipeline   video(!) stride=4 height=-1 robot=g1 gender=male
-  GET  /api/jobs/{job_id}
-  GET  /api/jobs/{job_id}/result/{filename}
-  GET  /api/jobs/{job_id}/log
-  POST /api/jobs/{job_id}/viser/start
-  DELETE /api/jobs/{job_id}
+  POST /api/tasks   video(!) start_frame=0 end_frame=300 subsample_factor=1
+                   robot_name=g1 height=-1.0 reconstruction_method=megasam task_id=""
+  GET  /api/tasks/{task_id}
+  GET  /api/tasks/{task_id}/result/{filename}
+  GET  /api/tasks/{task_id}/log
+  POST /api/tasks/{task_id}/viser/start
+  DELETE /api/tasks/{task_id}
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from .jobs import (
     new_job_id,
     read_status,
     safe_stem,
+    validate_task_id,
     write_status,
 )
 from .logging_setup import setup_logging
@@ -153,19 +155,22 @@ async def proxy_viser_websocket(websocket: WebSocket, path: str = ""):
 
 
 # --------------------------------------------------------------------------- #
-# Pipeline submission
+# Task submission
 # --------------------------------------------------------------------------- #
 
 
-@app.post("/api/pipeline", response_model=JobStatus)
-async def submit_pipeline(
+@app.post("/api/tasks", response_model=JobStatus)
+async def submit_task(
     video: UploadFile = File(...),  # noqa: B008
-    stride: int = Form(4),  # noqa: B008  # 16G 显存防 OOM：默认每 4 帧取 1 帧
-    height: float = Form(-1),  # noqa: B008
-    robot: str = Form("g1"),  # noqa: B008
-    gender: str = Form("male"),  # noqa: B008
+    start_frame: int | None = Form(None),  # noqa: B008  # None=抽全帧，交给 Makefile 自动检测
+    end_frame: int | None = Form(None),  # noqa: B008
+    subsample_factor: int = Form(1),  # noqa: B008  # = Makefile STRIDE，每 N 帧取 1 帧
+    robot_name: str = Form("g1"),  # noqa: B008
+    height: float = Form(-1.0),  # noqa: B008
+    reconstruction_method: str = Form("megasam"),  # noqa: B008
+    task_id: str = Form(""),  # noqa: B008
 ):
-    """Upload a video and start the real2sim pipeline."""
+    """Upload a video and start the real2sim pipeline (benchverse /api/tasks contract)."""
     from .jobs import job_dir
 
     cleanup_old_jobs()
@@ -174,9 +179,14 @@ async def submit_pipeline(
         raise HTTPException(status_code=400, detail="No filename provided")
     # 早期校验 height（_height_arg 抛 400）
     _height_arg(height)
+    if reconstruction_method not in ("megasam", "align3r"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"reconstruction_method must be 'megasam' or 'align3r', got: {reconstruction_method}",
+        )
 
     original_video_stem = safe_stem(video.filename, fallback="real2sim_job")
-    job_id = new_job_id(video.filename)
+    job_id = validate_task_id(task_id) if task_id else new_job_id(video.filename)
     # VideoMimic's Makefile writes to demo_data/$(VID_STEM). Use the unique
     # job id so repeated uploads of the same filename cannot reuse old outputs.
     video_stem = job_id
@@ -190,14 +200,17 @@ async def submit_pipeline(
     content = await video.read()
     video_path.write_bytes(content)
     logger.info(
-        "[%s] Received video %s (%s bytes), stride=%s height=%s robot=%s gender=%s",
-        job_id, video.filename, len(content), stride, height, robot, gender,
+        "[%s] Received video %s (%s bytes), start_frame=%s end_frame=%s subsample=%s "
+        "robot=%s height=%s reconstruction_method=%s",
+        job_id, video.filename, len(content), start_frame, end_frame,
+        subsample_factor, robot_name, height, reconstruction_method,
     )
 
     # Create initial status
     now = datetime.now(UTC).isoformat()
     write_status(job_id, {
         "job_id": job_id,
+        "task_id": job_id,  # benchverse client reads resp["task_id"]
         "status": "pending",
         "stage": None,
         "progress": 0.0,
@@ -206,8 +219,11 @@ async def submit_pipeline(
         "original_video_stem": original_video_stem,
         "video_filename": video_filename,
         "original_video_filename": video.filename,
-        "robot": robot,
-        "gender": gender,
+        "robot": robot_name,
+        "gender": "male",  # benchverse 不传 gender，内部默认
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "reconstruction_method": reconstruction_method,
         "result_files": [],
         "stage_timestamps": {},
         "created_at": now,
@@ -216,26 +232,30 @@ async def submit_pipeline(
 
     # Start pipeline in background
     asyncio.create_task(
-        run_pipeline(job_id, video_stem, stride, height, robot, gender)
+        run_pipeline(
+            job_id, video_stem, subsample_factor, height, robot_name, "male",
+            start_frame=start_frame, end_frame=end_frame,
+            reconstruction_method=reconstruction_method,
+        )
     )
 
     return JobStatus(**read_status(job_id))
 
 
 # --------------------------------------------------------------------------- #
-# Job status / results / log / cancel
+# Task status / results / log / cancel
 # --------------------------------------------------------------------------- #
 
 
-@app.get("/api/jobs/{job_id}", response_model=JobStatus)
-async def get_job_status(job_id: str):
-    data = read_status(job_id)
+@app.get("/api/tasks/{task_id}", response_model=JobStatus)
+async def get_task_status(task_id: str):
+    data = read_status(task_id)
     return JobStatus(**data)
 
 
-@app.get("/api/jobs/{job_id}/result/{filename}")
-async def download_result(job_id: str, filename: str):
-    data = read_status(job_id)
+@app.get("/api/tasks/{task_id}/result/{filename}")
+async def download_result(task_id: str, filename: str):
+    data = read_status(task_id)
     if data.get("status") != "completed":
         raise HTTPException(status_code=400, detail="Job not completed yet")
     for rf in data.get("result_files", []):
@@ -250,39 +270,39 @@ async def download_result(job_id: str, filename: str):
     raise HTTPException(status_code=404, detail=f"File {filename} not found")
 
 
-@app.get("/api/jobs/{job_id}/log")
-async def get_job_log(job_id: str, tail: int = 100):
+@app.get("/api/tasks/{task_id}/log")
+async def get_task_log(task_id: str, tail: int = 100):
     from .jobs import job_dir
-    log_path = job_dir(job_id) / "pipeline.log"
+    log_path = job_dir(task_id) / "pipeline.log"
     if not log_path.exists():
         return {"log": ""}
     lines = log_path.read_text(errors="replace").splitlines()
     return {"log": "\n".join(lines[-tail:])}
 
 
-@app.post("/api/jobs/{job_id}/viser/start")
-async def start_job_viser(job_id: str):
-    data = read_status(job_id)
+@app.post("/api/tasks/{task_id}/viser/start")
+async def start_task_viser(task_id: str):
+    data = read_status(task_id)
     if data.get("status") != "completed":
         raise HTTPException(status_code=400, detail="Job not completed yet")
-    start_final_viser(job_id, data)
+    start_final_viser(task_id, data)
     return {"url": "/api/viser/"}
 
 
-@app.delete("/api/jobs/{job_id}")
-async def cancel_job(job_id: str):
-    data = read_status(job_id)
+@app.delete("/api/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    data = read_status(task_id)
     if data.get("status") == "cancelled":
         return {"detail": "Job already cancelled"}
     if data.get("status") not in ("pending", "running"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel job in status: {data.get('status')}")
 
-    write_status(job_id, {
+    write_status(task_id, {
         **data,
         "status": "cancelled",
         "error_message": "Cancelled by user",
     })
-    await terminate_job_processes(job_id, data)
+    await terminate_job_processes(task_id, data)
     return {"detail": "Job cancelled"}
 
 

@@ -19,6 +19,7 @@ from .config import DEMO_DATA_DIR, JOBS_DIR, JOB_RETENTION_DAYS, REAL2SIM_DIR
 
 class JobStatus(BaseModel):
     job_id: str
+    task_id: str | None = None  # benchverse client 期望响应里有 task_id（= job_id）
     status: str  # pending, running, completed, failed
     stage: str | None = None
     progress: float = 0.0  # 0.0 - 1.0
@@ -90,6 +91,25 @@ def new_job_id(video_filename: str) -> str:
         if not job_dir(candidate).exists() and not (DEMO_DATA_DIR / candidate).exists():
             return candidate
     return f"{base}_{uuid.uuid4().hex[:8]}"
+
+
+# benchverse client 可传入 task_id 作 job_id；它同时拼进 JOBS_DIR/{id}/ 与
+# DEMO_DATA_DIR/{id}/，必须防路径穿越（../、绝对路径、隐藏文件名等）。
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def validate_task_id(task_id: str) -> str:
+    """校验外部传入的 task_id，合法则原样返回（作 job_id）。不合法抛 400。"""
+    if not task_id:
+        raise HTTPException(status_code=400, detail="task_id must not be empty")
+    if task_id in (".", ".."):
+        raise HTTPException(status_code=400, detail="task_id must not be '.' or '..'")
+    if not _TASK_ID_RE.match(task_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid task_id: must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+        )
+    return task_id
 
 
 def collect_result_files(video_stem: str) -> list[dict]:
