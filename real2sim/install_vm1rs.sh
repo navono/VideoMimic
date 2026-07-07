@@ -3,6 +3,15 @@
 # 遇错即停（set -euo pipefail），全量记日志；每步写 step.done 标记便于定位/续装。
 set -euo pipefail
 
+# HTTP 代理（pip/conda 子进程继承；VM1RS_PROXY 可在外层覆盖或置空关闭）
+VM1RS_PROXY="${VM1RS_PROXY:-http://192.168.8.195:18899}"
+export http_proxy="$VM1RS_PROXY" https_proxy="$VM1RS_PROXY"
+export HTTP_PROXY="$VM1RS_PROXY" HTTPS_PROXY="$VM1RS_PROXY"
+# git 不读 http_proxy env，pyroki 等包的 pyproject 会重新 git clone github 依赖，
+# 必须用 git config 配代理，否则 gnutls_handshake failed。
+git config --global http.proxy "$VM1RS_PROXY"
+git config --global https.proxy "$VM1RS_PROXY"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$ROOT/install_vm1rs.log"
 MARK_DIR="$ROOT/.install_marks"
@@ -71,9 +80,17 @@ run transformers "$PIP_BIN" install transformers
 
 # 5. ViTPose ------------------------------------------------------------
 # 注意：setuptools>=81 (2025) 移除了 pkg_resources，而 mim 仍 import pkg_resources →
-# mim 启动即崩。故装完 openmim 后把 setuptools 钉到 <81（保留 pkg_resources）。
-run openmim bash -c "$PIP_BIN install -U openmim && $PIP_BIN install 'setuptools<81'"
-run mmcv bash -c "source ${CONDA_SH:-$HOME/miniforge3/etc/profile.d/conda.sh} && conda activate vm1rs && $PIP_BIN install 'setuptools<81' && $PIP_BIN install --no-build-isolation mmcv==1.3.9"
+# mim 启动即崩。但 setuptools<67.4.1 的 pkg_resources 又引用了 Python3.12 已删除的
+# pkgutil.ImpImporter → mmcv/torch.utils.cpp_extension 等任何 import 都崩。
+# 故装完 openmim 后把 setuptools 钉到 [67.4.1,81)：既保留 pkg_resources（mim 需要），
+# 又修复 Py3.12 的 ImpImporter 问题。
+run openmim bash -c "$PIP_BIN install -U openmim && $PIP_BIN install 'setuptools>=67.4.1,<81'"
+# mmcv 1.3.9 是 2021 老包，无法在 Py3.12 上构建（同 ImpImporter 问题）。环境里若已有
+# 可导入的 mmcv 1.x（如 1.5.0），ViTPose 的 mmpose 0.24.0 兼容，无需强降到 1.3.9。
+run mmcv bash -c "source ${CONDA_SH:-$HOME/miniforge3/etc/profile.d/conda.sh} && conda activate vm1rs && \
+    $PIP_BIN install 'setuptools>=67.4.1,<81' && \
+    (python -c 'import mmcv' 2>/dev/null && echo 'mmcv 已存在，跳过 1.3.9 降级' || \
+     $PIP_BIN install --no-build-isolation mmcv==1.3.9)"
 if [[ ! -d "$ROOT/third_party/ViTPose" ]]; then
     run clone_vitpose git clone https://github.com/ViTAE-Transformer/ViTPose.git "$ROOT/third_party/ViTPose"
 fi
@@ -99,9 +116,15 @@ if [[ ! -d "$ROOT/third_party/viser" ]]; then
     run clone_viser git clone https://github.com/nerfstudio-project/viser "$ROOT/third_party/viser"
 fi
 run viser bash -c "cd '$ROOT/third_party/viser' && $PIP_BIN install -e ."
+# nodeenv: viser 首次实例化 ViserServer 时会 autobuild web client，需要 nodeenv 拉一份
+# 隔离的 Node.js（见 setup.md "Failed to install Node.js using nodeenv" troubleshooting）。
+# 缺它会让 retargeting 阶段在 server = viser.ViserServer(...) 直接 RuntimeError。
+# 离线/受限网络下 nodeenv 也可能装不动 Node，那就改用系统 Node 预构建 client：
+#   cd third_party/viser/src/viser/client && npm install && npm run build
+run nodeenv "$PIP_BIN" install 'nodeenv>=1.9.1'
 
 # 9. 服务依赖（real2sim/server）----------------------------------------
-run server_reqs "$PIP_BIN" install -r "$ROOT/server/requirements.txt"
+run server_reqs "$PIP_BIN" install -r "$ROOT/server/server_requirements.txt"
 
 log "全部步骤完成 ✓✓✓"
 echo "ALL_DONE" > "$MARK_DIR/_status"

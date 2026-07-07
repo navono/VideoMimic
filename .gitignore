@@ -5,7 +5,8 @@ simulation/data/checkpoints
 simulation/data/unitree_lafan
 simulation/data/videomimic_captures
 simulation/data/*.zip
-real2sim/assets
+real2sim/assets/*
+!real2sim/assets/*.mp4
 real2sim/demo_data
 real2sim/third_party
 real2sim/server/jobs

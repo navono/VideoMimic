@@ -574,7 +574,7 @@ def main(
     # Start Viser Visualization
     # ========================================================================
     
-    server = viser.ViserServer(port=port)
+    server = viser.ViserServer(host="0.0.0.0", port=port)
     
     # Initialize camera follow functions
     stop_camera_follow = None

@@ -82,6 +82,43 @@ def _terminate_process_group(job_id: str, pgid: int, sig: signal.Signals) -> Non
         logger.warning("[%s] Failed to send %s to process group %s: %s", job_id, sig.name, pgid, exc)
 
 
+async def terminate_all_process_groups() -> None:
+    """Kill every tracked pipeline process group. Called on server shutdown.
+
+    `make serve` runs a single foreground uvicorn, but each pipeline is a forked
+    process group (make → bash → megasam/megahunter/…, group leader = the shell
+    pid because run_logged_command uses start_new_session=True). Ctrl+C only stops
+    uvicorn; without this hook the pipeline is reparented to init and keeps pinning
+    the GPU. Here we SIGTERM then SIGKILL all groups so no orphan survives.
+
+    Source is strictly the in-memory RUNNING_PROCESS_GROUPS: those groups were
+    spawned by *this* server process and are still live/tracked. We deliberately
+    do NOT scan on-disk status.json here — a stale "running" job from a previous
+    run may hold a pgid the OS has since recycled to an unrelated process, and
+    signalling it would kill an innocent bystander.
+    """
+    # snapshot: the SIGKILL pass mutates nothing here, but registrations could
+    # change under us if a task tears down concurrently during shutdown.
+    pgids_by_job: dict[str, set[int]] = {
+        jid: set(pgids) for jid, pgids in RUNNING_PROCESS_GROUPS.items()
+    }
+    if not pgids_by_job:
+        return
+
+    total = sum(len(pgs) for pgs in pgids_by_job.values())
+    logger.info(
+        "Shutdown: terminating %s pipeline process group(s) across %s job(s)",
+        total, len(pgids_by_job),
+    )
+    for job_id, pgids in pgids_by_job.items():
+        for pgid in pgids:
+            _terminate_process_group(job_id, pgid, signal.SIGTERM)
+    await asyncio.sleep(1.0)
+    for job_id, pgids in pgids_by_job.items():
+        for pgid in pgids:
+            _terminate_process_group(job_id, pgid, signal.SIGKILL)
+
+
 async def terminate_job_processes(job_id: str, data: dict | None = None) -> None:
     from .jobs import job_dir, read_status as _rs  # noqa: F401 (kept for parity)
     data = data or read_status(job_id)

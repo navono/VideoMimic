@@ -123,6 +123,7 @@ async def run_pipeline(
     start_frame: int | None = None,
     end_frame: int | None = None,
     reconstruction_method: str = "megasam",
+    device: str = "",
 ) -> None:
     """Execute the full real2sim pipeline for a job, updating status along the way."""
     from .jobs import job_dir
@@ -131,9 +132,9 @@ async def run_pipeline(
     try:
         logger.info(
             "[%s] Pipeline submitted: video=%s stride=%s height=%s robot=%s gender=%s "
-            "start_frame=%s end_frame=%s reconstruction_method=%s",
+            "start_frame=%s end_frame=%s reconstruction_method=%s device=%s",
             job_id, video_stem, stride, height, robot, gender,
-            start_frame, end_frame, reconstruction_method,
+            start_frame, end_frame, reconstruction_method, device or "(all)",
         )
         write_status(job_id, {**read_status(job_id), "status": "running"})
         mark_stage(job_id, "extracting_frames", 0.0)
@@ -177,6 +178,7 @@ async def run_pipeline(
             f'export HF_TOKEN=${{HF_TOKEN:-}} && '
             f'make pipeline VIDEO_PATH="{video_src}" VID_STEM="{video_stem}" STRIDE={stride} HEIGHT={height_value} '
             f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"{frame_args} IS_MEGASAM={is_megasam}'
+            f' DEVICE={device}'
         )
 
         exit_code, tail_lines = await run_logged_command(

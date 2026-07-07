@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,13 +46,26 @@ from .runtime import (
     proxy_headers,
     rewrite_viser_html,
     start_final_viser,
+    terminate_all_process_groups,
     terminate_job_processes,
     websocket_subprotocols,
 )
 
 logger = setup_logging()
 
-app = FastAPI(title="VideoMimic Real2Sim API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """On shutdown (incl. Ctrl+C / SIGINT under uvicorn) kill every pipeline
+    subprocess group so we never orphan make/megahunter children on the GPU."""
+    yield
+    try:
+        await terminate_all_process_groups()
+    except Exception:  # noqa: BLE001
+        logger.exception("Shutdown: failed to terminate pipeline process groups")
+
+
+app = FastAPI(title="VideoMimic Real2Sim API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -169,6 +183,7 @@ async def submit_task(
     height: float = Form(-1.0),  # noqa: B008
     reconstruction_method: str = Form("megasam"),  # noqa: B008
     task_id: str = Form(""),  # noqa: B008
+    device: str = Form(""),  # noqa: B008  # GPU 编号(如 6;多卡 5,6),空=不限制
 ):
     """Upload a video and start the real2sim pipeline (benchverse /api/tasks contract)."""
     from .jobs import job_dir
@@ -201,9 +216,9 @@ async def submit_task(
     video_path.write_bytes(content)
     logger.info(
         "[%s] Received video %s (%s bytes), start_frame=%s end_frame=%s subsample=%s "
-        "robot=%s height=%s reconstruction_method=%s",
+        "robot=%s height=%s reconstruction_method=%s device=%s",
         job_id, video.filename, len(content), start_frame, end_frame,
-        subsample_factor, robot_name, height, reconstruction_method,
+        subsample_factor, robot_name, height, reconstruction_method, device or "(all)",
     )
 
     # Create initial status
@@ -224,6 +239,7 @@ async def submit_task(
         "start_frame": start_frame,
         "end_frame": end_frame,
         "reconstruction_method": reconstruction_method,
+        "device": device,
         "result_files": [],
         "stage_timestamps": {},
         "created_at": now,
@@ -236,6 +252,7 @@ async def submit_task(
             job_id, video_stem, subsample_factor, height, robot_name, "male",
             start_frame=start_frame, end_frame=end_frame,
             reconstruction_method=reconstruction_method,
+            device=device,
         )
     )
 

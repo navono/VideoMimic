@@ -295,14 +295,15 @@ See [commands.md](./commands.md) for detailed usage instructions.
 ## Benchverse HTTP Service on 5051
 
 Benchverse calls this real2sim pipeline through the HTTP service in
-`/home/ubuntu22/sourcecode/VideoMimic/real2sim/server/server.py`.
+`real2sim/server/` (multi-file: `app.py`, `pipeline.py`, `config.py`, ...;
+entry point `python -m server`).
 
 On the 5051 host:
 
 ```bash
 cd /home/ubuntu22/sourcecode/VideoMimic/real2sim
-make serve
-curl http://127.0.0.1:8090/api/health
+make serve                          # foreground; or: make serve-bg
+curl http://127.0.0.1:18090/api/health   # port via SERVER_PORT (default 18090)
 ```
 
 The Benchverse skill server at `:5052` can also manage this service:
@@ -319,10 +320,22 @@ The HTTP server must pass the uploaded job video to the Makefile with
 make_cmd = (
     f'{CONDA_EVAL} && '
     f'export HF_TOKEN=${{HF_TOKEN:-}} && '
-    f'make pipeline VIDEO_PATH="{video_src}" STRIDE={stride} HEIGHT={height_value} '
-    f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"'
+    f'make pipeline VIDEO_PATH="{video_src}" VID_STEM="{video_stem}" STRIDE={stride} HEIGHT={height_value} '
+    f'ROBOT={robot} GENDER={gender} PROXY="{PROXY_URL}"{frame_args} IS_MEGASAM={is_megasam}'
+    f' DEVICE={device}'
 )
 ```
+
+### GPU device (`DEVICE`)
+
+Each `/api/tasks` submission carries a `device` form field (GPU id, e.g. `6`;
+multi-gpu `5,6`; empty = no restriction). The server forwards it as
+`make pipeline ... DEVICE={device}`, and the Makefile exports it as
+`CUDA_VISIBLE_DEVICES` so torch/jax/CUDA runtime only see that card. Empty
+`device` is a no-op (inherits the server shell's environment — `make serve`
+defaults to no GPU pin so per-request `device=""` truly means "all GPUs visible";
+to pin the server process itself use `make serve SERVE_DEVICE=6`). Default
+`DEVICE ?= 6` applies to manual `make pipeline` / `make preprocess` / ... runs.
 
 On the 5051 deployment, the default stride should be `4` for 16GB GPUs:
 

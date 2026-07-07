@@ -1,8 +1,9 @@
 """Configuration: host paths, env-derived settings, stage definitions.
 
 All host-absolute paths and env-tunable knobs live here. Mirrors the top of the
-single-file server.py 1:1 (values unchanged). CONDA_SH / RL_LAB_DIR defaults
-stay /home/ubuntu22 on purpose (isaacgym is the 5051 deployment mainline).
+single-file server.py 1:1 (values unchanged). CONDA_SH defaults to
+~/miniforge3/etc/profile.d/conda.sh (expands per-user: /home/ubuntu22 on the
+5051 deployment, /home/pingqixing on this dev box); override via the CONDA_SH env.
 """
 
 from __future__ import annotations
@@ -43,10 +44,13 @@ JOB_RETENTION_DAYS = int(os.environ.get("VIDEOMIMIC_JOB_RETENTION_DAYS", "7"))
 # Conda / proxy / viser
 # --------------------------------------------------------------------------- #
 
-CONDA_SH = os.environ.get("CONDA_SH", "/home/ubuntu22/miniforge3/etc/profile.d/conda.sh")
+CONDA_SH = os.environ.get(
+    "CONDA_SH",
+    os.path.expanduser("~/miniforge3/etc/profile.d/conda.sh"),
+)
 CONDA_EVAL = f"source {CONDA_SH} && conda activate"
 DEFAULT_PORT = 8090
-DEFAULT_PROXY = "http://127.0.0.1:18899"
+DEFAULT_PROXY = "http://192.168.8.195:18899"
 PROXY_URL = os.environ.get("VIDEOMIMIC_PROXY", DEFAULT_PROXY)
 VISER_PORT = int(os.environ.get("VIDEOMIMIC_VISER_PORT", "8089"))
 VISER_URL = os.environ.get("VIDEOMIMIC_VISER_URL", f"http://127.0.0.1:{VISER_PORT}")

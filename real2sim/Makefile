@@ -2,7 +2,7 @@ SHELL := /bin/bash
 
 # --------------- Configurable variables ---------------
 # VIDEO_PATH: path to the video file (e.g. assets/sitting_standing.mp4)
-VIDEO_PATH  ?= ./assets/sitting_standing.mp4
+VIDEO_PATH  ?= ./assets/talented-urban-woman-dancing.mp4
 STRIDE      ?= 4
 ROBOT       ?= g1
 HEIGHT      ?= -1
@@ -49,9 +49,33 @@ POSTPROC_DIR    := $(BASE_DIR)/output_calib_mesh/megahunter_$(RESULT_TAG)
 CONDA_EVAL := eval "$$(conda shell.bash hook)"
 
 # --------------- Proxy & HF (override PROXY= to disable) ---------------
-PROXY ?= http://127.0.0.1:18899
+PROXY ?= http://192.168.8.195:18899
 HF_TOKEN ?= xx
 PROXY_ENV := $(if $(PROXY),http_proxy=$(PROXY) https_proxy=$(PROXY),) HF_TOKEN=$(HF_TOKEN)
+
+# --------------- GPU device ---------------
+# DEVICE 是 GPU 编号(纯数字,如 6;多卡用逗号如 5,6),导出为 CUDA_VISIBLE_DEVICES
+# 让 torch/jax/CUDA runtime 都只看到这块卡。默认 6(本机空闲卡);DEVICE= 传空则"沿用父 shell 环境"
+# (不主动 export,即不覆盖父 shell 已有的 CUDA_VISIBLE_DEVICES;若父 shell 未设则全部可见)。
+# 注意:CUDA_VISIBLE_DEVICES=""(空串)会让 CUDA 看不到任何卡,与"未设"语义不同,故空值只作 no-op。
+# 并入 PROXY_ENV,使所有 stage target 自动生效;pipeline/serve 目标用 export 形式单独处理,见下文。
+DEVICE ?= 6
+DEVICE_ENV := $(if $(DEVICE),CUDA_VISIBLE_DEVICES=$(DEVICE),)
+PROXY_ENV := $(PROXY_ENV) $(DEVICE_ENV)
+
+# --------------- visualize 端口 ---------------
+# make visualize 起的 viser server 端口（host 固定 0.0.0.0，可远端访问）。
+# 覆盖示例：make visualize VIS_PORT=18090
+VIS_PORT ?= 18089
+
+# --------------- xformers (vm1recon MegaSAM) ---------------
+# vm1recon 的 xformers 0.0.22 装了但 CUDA op 没编译(与 torch 2.0.1+cu118 ABI 不匹配),
+# 运行时 memory_efficient_attention 抛 NotImplementedError,炸掉 UniDepth/MegaSAM 的 DINOv2。
+# 设 XFORMERS_DISABLED=1 让官方 dinov2 走 torch SDPA(scaled_dot_product_attention,内置可用);
+# UniDepth 的 MetaDINOv2 attention.py 已加 CUDA 探测回退。vm1rs 没装 xformers,不受影响。
+# 想用真 xformers(装好 CUDA 版后)传 XFORMERS_DISABLED= 覆盖。
+XFORMERS_DISABLED ?= 1
+PROXY_ENV := $(PROXY_ENV) XFORMERS_DISABLED=$(XFORMERS_DISABLED)
 
 # --------------- jaxls solve env (Step 2 optimization & Step 4 retargeting) ---------------
 # The jaxls FK-jacobian kernels crash XLA's compiler (both the CPU LLVM backend
@@ -62,6 +86,13 @@ PROXY_ENV := $(if $(PROXY),http_proxy=$(PROXY) https_proxy=$(PROXY),) HF_TOKEN=$
 # but CPU made megahunter take ~20min; on a 24GB GPU stride=2 (~150 frames) fits
 # comfortably. If you hit OOM, raise STRIDE or restore JAX_PLATFORMS=cpu.
 JAXLS_ENV := XLA_FLAGS="--xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true"
+
+# --------------- retargeting solve env (Step 4 only) ---------------
+# Step 4 的 jaxls 三角求解在 GPU 上会崩(JaxRuntimeError: INTERNAL: Unable to launch
+# triangular solve [jit_retarget_human_to_robot]),CUDA cuSOLVER 后端对该 kernel 支持不稳。
+# 强制 JAX_PLATFORMS=cpu 让 retarget 走 CPU LLVM 后端(torch 的 GPU 工作不受影响);
+# Step 2 megahunter 仍留在 GPU(那步 GPU 正常且更快),故单独给 Step 4 用此 env。
+RETARGET_ENV := JAX_PLATFORMS=cpu $(JAXLS_ENV)
 
 # --------------- Targets ---------------
 
@@ -75,6 +106,8 @@ _init_dirs:
 # Full pipeline in a single shell (conda env switches work correctly)
 pipeline: _init_dirs
 	@$(CONDA_EVAL) && \
+	$(if $(DEVICE_ENV),export $(DEVICE_ENV) && echo "Using GPU: $(DEVICE)" &&,) \
+	export XFORMERS_DISABLED=$(XFORMERS_DISABLED) && \
 	$(if $(PROXY),export http_proxy=$(PROXY) https_proxy=$(PROXY) HF_TOKEN=$(HF_TOKEN) &&,) \
 	$(if $(PROXY),,export HF_TOKEN=$(HF_TOKEN) &&) \
 	echo "=== Step 0: Preprocessing ===" && \
@@ -112,7 +145,7 @@ pipeline: _init_dirs
 	    --gender $(GENDER) $(IS_MEGASAM_FLAG) && \
 	echo "=== Step 4: Retargeting ===" && \
 	conda activate vm1rs && \
-	$(JAXLS_ENV) python stage4_retargeting/robot_motion_retargeting.py \
+	$(RETARGET_ENV) python stage4_retargeting/robot_motion_retargeting.py \
 	    --src-dir "$$POSTPROC_DIR" \
 	    --contact-dir $(CONTACT_DIR) && \
 	echo "Pipeline complete! Results in $$POSTPROC_DIR"
@@ -181,19 +214,33 @@ postprocess: _init_dirs
 # ---------- Step 4: Retargeting (vm1rs) ----------
 retarget: _init_dirs
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	$(PROXY_ENV) $(JAXLS_ENV) python stage4_retargeting/robot_motion_retargeting.py \
+	$(PROXY_ENV) $(RETARGET_ENV) python stage4_retargeting/robot_motion_retargeting.py \
 	    --src-dir $(POSTPROC_DIR) \
 	    --contact-dir $(CONTACT_DIR)
 
 # ---------- Visualization ----------
+# BASE_DIR 解析逻辑：server pipeline 给每次 job 的目录加了时间戳后缀
+# (如 talented-urban-woman-dancing_20260707_132121)，而 VIDEO_PATH 解析出的
+# VID_STEM 不带时间缀。故先试精确 $(BASE_DIR)；不存在则 fallback 到
+# demo_data/${VID_STEM}_* 取字典序最新（=时间戳最新）的那个。
 visualize:
-	@POSTPROC_DIR=$$(for d in $(BASE_DIR)/output_calib_mesh/*/; do [ -f "$$d/retarget_poses_g1.h5" ] && echo "$$d" && break; done) && \
-	if [ -z "$$POSTPROC_DIR" ]; then echo "Error: no complete results found in $(BASE_DIR)/output_calib_mesh/"; exit 1; fi && \
-	echo "Visualizing: $$POSTPROC_DIR" && \
+	@VIS_BASE=""; \
+	if [ -d "$(BASE_DIR)" ]; then \
+		VIS_BASE="$(BASE_DIR)"; \
+	else \
+		VIS_BASE=$$(for d in demo_data/$(VID_STEM)_*/; do [ -d "$$d" ] && echo "$$d"; done | tail -1); \
+		VIS_BASE=$${VIS_BASE%/}; \
+	fi; \
+	if [ -z "$$VIS_BASE" ]; then \
+		echo "Error: no results dir for VID_STEM='$(VID_STEM)' (tried $(BASE_DIR) and demo_data/$(VID_STEM)_*/)"; exit 1; \
+	fi; \
+	POSTPROC_DIR=$$(for d in "$$VIS_BASE"/output_calib_mesh/*/; do [ -f "$$d/retarget_poses_g1.h5" ] && echo "$$d" && break; done) && \
+	if [ -z "$$POSTPROC_DIR" ]; then echo "Error: no complete results (retarget_poses_g1.h5) found under $$VIS_BASE/output_calib_mesh/"; exit 1; fi && \
+	echo "Visualizing: $$POSTPROC_DIR  (matched base: $$VIS_BASE)" && \
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	$(PROXY_ENV) python visualization/complete_results_egoview_visualization.py \
-	    --postprocessed-dir "$$POSTPROC_DIR" \
-	    --robot-name $(ROBOT) $(IS_MEGASAM_FLAG)
+		$(PROXY_ENV) python visualization/complete_results_egoview_visualization.py \
+		    --postprocessed-dir "$$POSTPROC_DIR" \
+		    --robot-name $(ROBOT) --port $(VIS_PORT) $(IS_MEGASAM_FLAG)
 
 # ---------- Convert to AdaMimic (vm1rs) ----------
 # Converts retarget_poses_g1.h5 to AdaMimic data.pt for stage1 training.
@@ -330,8 +377,17 @@ define _optimize_body
 endef
 
 # --------------- HTTP API Server ---------------
-SERVER_PORT ?= 8090
+# serve 自身不做 GPU 计算(只 fork `make pipeline` 子进程),默认不 pin GPU:
+# 这样客户端传 device=""(不限)时,子进程继承到空环境 → 全部卡可见;
+# 客户端传 device=6 时,子进程的 make pipeline 会显式 export CUDA_VISIBLE_DEVICES=6。
+# 顶层 DEVICE ?= 6 默认值 *不* 作用于 serve(否则 device="" 会被父环境污染成 6);
+# 要给 serve 自身一个 GPU(如服务端 import 了 CUDA 库想预加载),用 SERVE_DEVICE:
+#   make serve SERVE_DEVICE=6
+SERVER_PORT ?= 18090
 SERVER_LOG  ?= /tmp/videomimic-server.log
+# serve 专用 GPU pin,独立于顶层 DEVICE(默认空 = 不限,保护 device="" 语义)。
+SERVE_DEVICE ?=
+SERVE_DEVICE_ENV := $(if $(SERVE_DEVICE),CUDA_VISIBLE_DEVICES=$(SERVE_DEVICE),)
 
 .PHONY: serve serve-install serve-bg serve-stop serve-log
 
@@ -343,12 +399,14 @@ serve-install:
 # Foreground (for development / debugging)
 serve:
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	python -m server
+	$(if $(SERVE_DEVICE_ENV),export $(SERVE_DEVICE_ENV) && echo "serve: pinned to GPU $(SERVE_DEVICE)" &&,) \
+	VIDEOMIMIC_PORT=$(SERVER_PORT) python -m server
 
 # Background (for production / persistent)
 serve-bg:
 	$(CONDA_EVAL) && conda activate vm1rs && \
-	nohup python -m server > $(SERVER_LOG) 2>&1 & echo "PID=$$!"
+	$(if $(SERVE_DEVICE_ENV),export $(SERVE_DEVICE_ENV) && echo "serve: pinned to GPU $(SERVE_DEVICE)" &&,) \
+	VIDEOMIMIC_PORT=$(SERVER_PORT) nohup python -m server > $(SERVER_LOG) 2>&1 & echo "PID=$$!"
 
 # Stop background server
 serve-stop:
