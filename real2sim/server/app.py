@@ -10,6 +10,7 @@ Routes/params/defaults match the benchverse client contract (real2sim_client.py)
   GET  /api/tasks/{task_id}/result/{filename}
   GET  /api/tasks/{task_id}/log
   POST /api/tasks/{task_id}/viser/start
+  POST /api/tasks/{task_id}/viser/stop
   DELETE /api/tasks/{task_id}
 """
 
@@ -27,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 from .config import (
+    DEFAULT_DEVICE,
     DEFAULT_PORT,
     REAL2SIM_DIR,
     VISER_URL,
@@ -46,6 +48,7 @@ from .runtime import (
     proxy_headers,
     rewrite_viser_html,
     start_final_viser,
+    stop_final_viser,
     terminate_all_process_groups,
     terminate_job_processes,
     websocket_subprotocols,
@@ -183,12 +186,15 @@ async def submit_task(
     height: float = Form(-1.0),  # noqa: B008
     reconstruction_method: str = Form("megasam"),  # noqa: B008
     task_id: str = Form(""),  # noqa: B008
-    device: str = Form(""),  # noqa: B008  # GPU 编号(如 6;多卡 5,6),空=不限制
+    device: str = Form(""),  # noqa: B008  # GPU 编号(如 6;多卡 5,6),空=用 DEFAULT_DEVICE
 ):
     """Upload a video and start the real2sim pipeline (benchverse /api/tasks contract)."""
     from .jobs import job_dir
 
     cleanup_old_jobs()
+
+    # 请求未指定 device 时用服务默认（DEFAULT_DEVICE），避免空值落到满载卡上 OOM。
+    device = device.strip() or DEFAULT_DEVICE
 
     if not video.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
@@ -304,6 +310,20 @@ async def start_task_viser(task_id: str):
         raise HTTPException(status_code=400, detail="Job not completed yet")
     start_final_viser(task_id, data)
     return {"url": "/api/viser/"}
+
+
+@app.post("/api/tasks/{task_id}/viser/stop")
+async def stop_task_viser(task_id: str):
+    """Stop the transient Viser, freeing its GPU memory and port.
+
+    Called by benchverse when the user closes the preview panel. Without this
+    Viser leaks: it is launched detached and keeps holding model data + port.
+    """
+    # Confirm the task exists (404 if not) but don't require it to be completed —
+    # the Viser may outlive a job that was re-run.
+    read_status(task_id)
+    stopped = stop_final_viser(task_id)
+    return {"stopped": stopped}
 
 
 @app.delete("/api/tasks/{task_id}")

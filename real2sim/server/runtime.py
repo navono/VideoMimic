@@ -161,6 +161,28 @@ async def terminate_job_processes(job_id: str, data: dict | None = None) -> None
             logger.warning("[%s] Fallback pkill KILL failed for %s: %s", job_id, pattern, exc)
 
 
+def stop_final_viser(job_id: str | None = None) -> bool:
+    """Kill the transient Viser (complete_results_egoview_visualization.py).
+
+    Viser is launched detached (start_new_session=True) and has no stop
+    endpoint of its own, so without this it leaks: it keeps holding GPU memory
+    (SMPL/pointcloud models) and the VISER_PORT after the user closes the
+    preview. benchverse calls this on "close preview". Returns True if any
+    process was matched.
+    """
+    result = subprocess.run(
+        ["pkill", "-f", "complete_results_egoview_visualization.py"],
+        capture_output=True, check=False, timeout=5,
+    )
+    killed = result.returncode == 0
+    label = f"[{job_id}]" if job_id else "[viser]"
+    if killed:
+        logger.info("%s Stopped final Viser (pkill matched)", label)
+    else:
+        logger.info("%s stop_final_viser: no running Viser found", label)
+    return killed
+
+
 def start_final_viser(job_id: str, data: dict) -> None:
     from .jobs import job_dir, postprocessed_dir_from_status
     postprocessed_dir = postprocessed_dir_from_status(data)
@@ -168,10 +190,8 @@ def start_final_viser(job_id: str, data: dict) -> None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="No completed visualization directory found")
 
-    subprocess.run(
-        ["pkill", "-f", "complete_results_egoview_visualization.py"],
-        capture_output=True, check=False, timeout=5,
-    )
+    # Kill any previously-started Viser so the port is free for the new one.
+    stop_final_viser(job_id)
 
     log_path = job_dir(job_id) / "viser.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

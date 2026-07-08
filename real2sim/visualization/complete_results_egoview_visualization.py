@@ -390,7 +390,7 @@ def main(
     is_megasam: bool = True,
     save_ego_view: bool = False,
     no_spf: bool = True,
-    port: int = 8089,
+    port: int = 18091,
 ) -> None:
     """
     Main visualization function for complete pipeline results.
